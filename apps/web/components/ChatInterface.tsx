@@ -5,7 +5,7 @@ import MessageInput from './MessageInput'
 import { AudioWaveform, icons, PencilRuler, Replace, Rocket, ScanSearch, Send } from 'lucide-react'
 import Capsules from './ui/Capsules'
 import HeySol from './HeySol'
-import { WEBSOCKET_URL } from '@hey-sol/shared/constants'
+import { WEBSOCKET_URL } from '@hey-sol/shared'
 
 type Message = {
     id: string;
@@ -68,12 +68,12 @@ const ChatInterface = () => {
 
           accumulatedText += formattedText
 
-          setMessages((prev) => [...prev,{
-            id: "streaming-msg",
-            text: accumulatedText,
-            sender: 'bot',
-            timestamp: new Date(),
-          }])
+          // setMessages((prev) => [...prev,{
+          //   id: "streaming-msg",
+          //   text: accumulatedText,
+          //   sender: 'bot',
+          //   timestamp: new Date(),
+          // }])
 
         } else if (resp.type === 'done') {
           setMessages((prev) => [...prev,{
@@ -126,19 +126,20 @@ const ChatInterface = () => {
     // //     endRef.current?.scrollIntoView({behavior: "smooth", block:"end"})
     // //   }
     // // },[messages])
-
+    let msgText = ""
    return (
    <div className="flex-1 overflow-y-auto max-h-[calc(100vh-220px)] py-4 pb-8">
       <div className="flex flex-col gap-1">
-        {messages.map((m, i) => (
-          <p 
+        {messages.map((m: any, i: number) => {
+
+          return <p 
             key={i}
             style={{ textAlign: m.sender === 'user' ? "right" : "left" }} 
             
           >
             <p className={`${m.sender === 'user' ? 'bg-background rounded-lg my-3 inline-block p-4' : "" } `}>{m.text}</p>
           </p>
-          ))}
+  })}
       </div>
       {/* <div ref={endRef} className='bg-amber-400 w-2 h-2 relative bottom-0 mb-2'/> */}
     </div>

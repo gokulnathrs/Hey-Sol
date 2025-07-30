@@ -4,7 +4,6 @@
   "description": "",
   "main": "index.js",
   "exports" : {
-    "./constants/sol": "./constants/solana.ts",
-    "./constants" : "./constants/index.ts"
+    ".": "./index.ts"
   }
 }
