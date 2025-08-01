@@ -1,7 +1,7 @@
 {
     "name": "mcp-client-py",
     "version": "1.0.0",
-    "description": "Python client for MCP (Multi-Channel Protocol)",
+    "description": "Python client for MCP (ModelContextProtocol)",
     "scripts": {
         "dev": "uv run main.py",
         "start": "uv run main.py"
