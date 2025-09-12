@@ -1,0 +1,23 @@
+.venv/
+venv/
+dist/
+build/
+*.pyc
+__pycache__/
+*.log
+*.env
+*.DS_Store
+*.egg-info/
+*.db
+*.sqlite3
+*.pyo   
+
+# Ignore all node_modules directories
+**/node_modules
+
+# Ignore build outputs and cache
+**/dist
+.turbo
+
+# Ignore system files
+.DS_Store

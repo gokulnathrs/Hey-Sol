@@ -1,13 +1,17 @@
 
 import { z } from "zod";
 import * as dotenv from "dotenv";
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Address, appendTransactionMessageInstruction, createKeyPairSignerFromBytes, createSolanaRpc, createSolanaRpcSubscriptions, createTransactionMessage, generateKeyPairSigner, getSignatureFromTransaction, lamports, pipe, sendAndConfirmTransactionFactory, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners } from "@solana/kit";
+import { Address, appendTransactionMessageInstruction, compileTransactionMessage, createKeyPairSignerFromBytes, createSolanaRpc, createSolanaRpcSubscriptions, createTransactionMessage, generateKeyPairSigner, getSignatureFromTransaction, lamports, pipe, sendAndConfirmTransactionFactory, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners, TransactionSigner } from "@solana/kit";
 import { getTransferSolInstruction } from "@solana-program/system";
 import { string } from "zod/v4";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
+import { publicKey } from "@metaplex-foundation/umi";
+import { fetchAssetsByOwner } from "@metaplex-foundation/mpl-core";
+import { fetchMetadata } from "./helper/index.js";
 
 dotenv.config();
 
@@ -28,8 +32,6 @@ function validateEnvironment() {
     );
   }
 }
-
-
 
 async function send_sol(amount: string, address: string){
   try {
@@ -98,6 +100,7 @@ async function main() {
   try {
     // Validate environment before proceeding
     validateEnvironment();
+    const RPC_URL = process.env.RPC_URL as string;
 
     const mcpServerOptions = {
       name: "hey-sol-mcp-server",
@@ -106,40 +109,128 @@ async function main() {
 
     const server = new McpServer(mcpServerOptions);
 
-    server.tool(
-      "send_sol",
-      "Transfers Solana(SOL) to a wallet address",
+      server.tool(
+      "prepare_send_sol_transaction",
+      "Prepares an unsigned transaction to transfer SOL",
       {
         amount: z.string().describe("Amount of SOL to send"),
-        address: z.string().describe("Wallet address to send SOL to")
+        address: z.string().describe("Recipient wallet address"),
+        sender: z.string().describe("Sender wallet address"),
       },
-      async ({ amount , address}) => {
-        console.error("SOL amount ", amount);
+      async ({ amount, address, sender }) => {
+        try {
+          const rpcUrl = process.env.RPC_URL as string;
+          const rpc = createSolanaRpc(rpcUrl);
 
-        const txn = await send_sol(amount,address)
+          // Get latest blockhash
+          const { value: latestBlockHash } = await rpc.getLatestBlockhash().send();
 
-        if(txn.status === "success"){
+          const lamportAmount = Math.floor(parseFloat(amount) * LAMPORTS_PER_SOL);
+
+          // Build transaction message (unsigned)
+          const compiledMessage = new TransactionMessage({
+            payerKey: new PublicKey(sender),
+            recentBlockhash: latestBlockHash.blockhash,
+            instructions: [
+              SystemProgram.transfer({
+                fromPubkey: new PublicKey(sender),
+                toPubkey: new PublicKey(address),
+                lamports: lamportAmount,
+              })
+            ],
+          }).compileToV0Message();
+
+          const unsignedTx = new VersionedTransaction(compiledMessage);
+          const serializedMessage = Buffer.from(unsignedTx.serialize()).toString("base64");
           return {
             content: [
               {
                 type: "text",
-                text: `Successfully sent ${amount} SOL to ${address}. Transaction signature: ${txn.signature}`
+                text: JSON.stringify({
+                  message: `Prepared transaction for send-sol`,
+                  type: "transaction",
+                  action: "send-sol",
+                  txMessageBase64: serializedMessage,
+                  metadata: { recipient: address, amount }
+                })
               }
-            ]   
+            ]
           }
+        } catch (error) {
+          console.error("Failed to prepare transaction:", error);
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error preparing unsigned transaction."
+              }
+            ]
+          };
         }
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to send ${amount} SOL to ${address}.`
-            }
-          ]
-        }
-
       }
-    )
+    );
+    
+     server.tool(
+      "get_owned_nfts",
+      "Fetch NFTs owned by a wallet (optionally filter by collection mint)",
+      {
+        owner: z.string().describe("Owner wallet public key"),
+        collectionMint: z.string().optional().describe("Optional collection mint to filter NFTs"),
+      },
+      async ({ owner, collectionMint }) => {
+        try {
+          const umi = createUmi(RPC_URL);
+
+          const assets = await fetchAssetsByOwner(umi, publicKey(owner));
+
+          let filtered = assets;
+          if (collectionMint) {
+            filtered = assets.filter(
+              (nft) =>
+                nft.updateAuthority?.type === "Collection" &&
+                nft.updateAuthority?.address === collectionMint
+            );
+          }
+
+          const nftDetails: any[] = [];
+          for (const nft of filtered) {
+            const metadata = await fetchMetadata(nft.uri);
+            nftDetails.push({
+              mint: nft.publicKey.toString(),
+              name: nft.name,
+              uri: nft.uri,
+              image: metadata?.image || null,
+              description: metadata?.description || null,
+              attributes: metadata?.attributes || [],
+            });
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  type: "nft-list",
+                  owner,
+                  collectionMint: collectionMint || null,
+                  nfts: nftDetails,
+                }),
+              },
+            ],
+          };
+        } catch (err: any) {
+          console.error("❌ get_owned_nfts error:", err);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error fetching NFTs: ${err.message}`,
+              },
+            ],
+          };
+        }
+      }
+    );
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
