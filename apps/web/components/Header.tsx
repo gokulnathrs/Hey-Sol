@@ -6,21 +6,16 @@ const Header = () => {
         const { connected, publicKey } = useWallet();
 
 return (
-    <nav className='w-full flex p-4 justify-between'>
-          <div className="h-full flex flex-col">
+    <nav className='w-full flex p-4 justify-end'> 
       {/* Wallet connect */}
       <div className="p-2 flex justify-end">
-        <WalletMultiButton className="!bg-sol-purple !rounded-xl" />
+        <WalletMultiButton 
+          style={{ 
+            background: "linear-gradient(90deg, var(#9945ff), var(#14f195))",
+            borderRadius: "12px",
+          }}
+        />
       </div>
-
-      {connected && publicKey && (
-        <p className="text-xs text-foreground/70 px-2">
-          Connected: {publicKey.toBase58().slice(0, 6)}...
-          {publicKey.toBase58().slice(-4)}
-        </p>
-      )}
-
-    </div>
     </nav>
 )
 }

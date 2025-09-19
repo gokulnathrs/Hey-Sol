@@ -109,7 +109,7 @@ async function main() {
 
     const server = new McpServer(mcpServerOptions);
 
-      server.tool(
+    server.tool(
       "prepare_send_sol_transaction",
       "Prepares an unsigned transaction to transfer SOL",
       {
@@ -147,7 +147,7 @@ async function main() {
               {
                 type: "text",
                 text: JSON.stringify({
-                  message: `Prepared transaction for send-sol`,
+                  message: `Sending ${amount} SOL to ${address}, Sign the transaction to proceed.`,
                   type: "transaction",
                   action: "send-sol",
                   txMessageBase64: serializedMessage,
@@ -170,7 +170,7 @@ async function main() {
       }
     );
     
-     server.tool(
+    server.tool(
       "get_owned_nfts",
       "Fetch NFTs owned by a wallet (optionally filter by collection mint)",
       {
@@ -231,6 +231,130 @@ async function main() {
         }
       }
     );
+
+    server.tool(
+      "get_balance",
+      "Returns the SOL balance of a wallet address",
+      {
+        address: z.string().describe("Wallet public key to check balance"),
+      },
+      async ({ address }) => {
+        try {
+          const rpcUrl = process.env.RPC_URL as string;
+          const connection = new Connection(rpcUrl, "confirmed");
+          const publicKey = new PublicKey(address);
+          const balanceLamports = await connection.getBalance(publicKey, "confirmed");
+          const balanceSol = balanceLamports / LAMPORTS_PER_SOL;
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  type: "balance",
+                  address,
+                  balance: balanceSol,
+                  unit: "SOL",
+                }),
+              },
+            ],
+          };
+        } catch (error: any) {
+          console.error("❌ get_balance error:", error);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error fetching balance: ${error.message}`,
+              },
+            ],
+          };
+        }
+      }
+    );
+
+
+    server.tool(
+      "get_recent_transactions",
+      "Fetch the recent N transactions for a given wallet",
+      {
+        wallet: z.string().describe("The wallet address to check"),
+        limit: z.number().min(1).max(20).default(5).describe("Number of recent transactions to fetch")
+      },
+      async ({ wallet, limit }) => {
+        try {
+          const connection = new Connection(process.env.RPC_URL as string);
+
+          // Fetch recent signatures
+          const signatures = await connection.getSignaturesForAddress(
+            new PublicKey(wallet),
+            { limit }
+          );
+
+          console.log(`Fetched ${signatures.length} signatures for ${wallet}`);
+          console.log(signatures)
+
+          const txs: any[] = [];
+          for (const sigInfo of signatures) {
+            const tx = await connection.getTransaction(sigInfo.signature, {
+              maxSupportedTransactionVersion: 0,
+            });
+
+            console.log('tx', tx)
+
+            if (!tx) continue;
+
+            let description = "Unknown transaction";
+
+            // Simple decode example: check SOL transfer
+            // tx.transaction.message.instructions.forEach((ix) => {
+            // try {
+            //   if ("parsed" in ix) {
+            //     const parsed = (ix as any).parsed;
+            //     if (parsed?.type === "transfer") {
+            //       description = `${parsed.info.lamports / LAMPORTS_PER_SOL} SOL sent to ${parsed.info.destination}`;
+            //     }
+            //   }
+            // } catch (e) {
+            //   // ignore parse errors
+            // }
+            // });
+
+            txs.push({
+              signature: sigInfo.signature,
+              slot: tx.slot,
+              blockTime: tx.blockTime,
+              description,
+              status: sigInfo.confirmationStatus,
+            });
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  message: `Fetched ${txs.length} recent transactions`,
+                  type: "transactions",
+                  wallet,
+                  transactions: txs,
+                }, null, 2),
+              },
+            ],
+          };
+        } catch (err) {
+          console.error("❌ Failed to fetch transactions:", err);
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error fetching transactions",
+              },
+            ],
+          };
+        }
+      }
+    );
+
 
     const transport = new StdioServerTransport();
     await server.connect(transport);

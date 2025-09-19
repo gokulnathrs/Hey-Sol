@@ -35,9 +35,9 @@ const ChatInterface = () => {
   const [nfts, setNfts] = useState<NFT[]>([]);
 
   const quickActions = [
-    { label : "Transfer SOL", icon: <Rocket className='size-4' /> },
+    { label : "Send SOL", icon: <Rocket className='size-4' /> },
     { label : "List NFTs", icon: <AudioWaveform className='size-4' /> },
-    { label : "Swap Tokens", icon: <Replace className='size-4' /> },
+    { label : "Get Balance", icon: <Replace className='size-4' /> },
     { label : "View Transactions", icon: <ScanSearch className='size-4' /> }
   ]
 
@@ -65,7 +65,7 @@ const ChatInterface = () => {
     ...prev,
     {
       id: Date.now().toString(),
-      text: `✅ Transaction successful!\nSignature: ${sig}`,
+      text: `Transaction successful!\nSignature: ${sig}`,
       sender: "bot",
       timestamp: new Date(),
     },
@@ -114,7 +114,7 @@ const ChatInterface = () => {
               ...prev,
               {
                 id: Date.now().toString(),
-                text: `📝 Prepared ${resp.transaction.action} transaction for ${resp.transaction.metadata.amount} SOL → ${resp.transaction.metadata.recipient}`,
+                text: resp.transaction.message || `📝 Prepared ${resp.transaction.action} transaction for ${resp.transaction.metadata.amount} SOL → ${resp.transaction.metadata.recipient}`,
                 sender: "bot",
                 timestamp: new Date(),
                 signablePayload: resp.transaction
@@ -134,7 +134,7 @@ const ChatInterface = () => {
             },
           ]);
           return;
-        } else if (resp.type === 'done') {
+        } else if (resp.type === 'done' && (resp.message || accumulatedText)) {
           setMessages((prev) => [...prev,{
             id: (Date.now() + 1).toString(),
             text: accumulatedText || "Prepared transaction",
