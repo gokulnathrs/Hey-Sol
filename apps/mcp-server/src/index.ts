@@ -325,6 +325,8 @@ async function main() {
               blockTime: tx.blockTime,
               description,
               status: sigInfo.confirmationStatus,
+              sigInfo: sigInfo,
+              tx: tx
             });
           }
 
@@ -337,6 +339,7 @@ async function main() {
                   type: "transactions",
                   wallet,
                   transactions: txs,
+                  signatures: signatures
                 }, null, 2),
               },
             ],

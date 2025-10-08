@@ -54,12 +54,13 @@ class MCPClient:
         self.mcp_tools = tools
 
     async def stream_query(self, query: str, websocket: Optional[WebSocket] = None, context: Optional[str] = None):
+        # print(f"Streaming query: {query} with context: {context}")
         if not self.session:
             raise ValueError("MCP client session is not initialized")
 
         contents = []
         if context:
-            full_query = f"{context}\n{query}"
+            full_query = f"{context}  {query}"
             contents.append(genai.types.Content(
                 role="user",
                 parts=[genai.types.Part.from_text(text=full_query)]
@@ -70,20 +71,28 @@ class MCPClient:
                 parts=[genai.types.Part.from_text(text=query)]
             ))
 
-        stream = await self.genai_client.aio.models.generate_content_stream(
+        try:
+            # print("Creating Gemini stream... ")
+            print(contents)
+            stream = await self.genai_client.aio.models.generate_content_stream(
             model="gemini-2.0-flash",
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 temperature=0.5,
                 tools=self.mcp_tools,
             ),
-        )
+            )
+            # print("Gemini stream created.")
+        except Exception as e:
+            print(f"Error creating Gemini stream: {e}")
+            raise
 
         tool_call_part = None
         tool_name = None
         tool_args = None
 
         async for chunk in stream:
+            # print(f"Received chunk: {chunk}")
             if chunk.candidates and chunk.candidates[0].content and getattr(chunk.candidates[0].content, "parts", None):
                 for part in chunk.candidates[0].content.parts:
                     if part is None:
@@ -132,7 +141,7 @@ class MCPClient:
                         print("Parsing content failed:", e)
 
                 function_response = {"result": result.content}
-                # print(f"[Tool Result] {function_response}")
+                print(f"[Tool Result] {function_response}")
 
                 # Send txn_signing event to UI
                 if tx_payload and websocket:
@@ -248,7 +257,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             user_message = data.get('message', '')
             context = data.get('context', '')
-            print(f"Received query: {user_message}, context: {context}")
+            print(f"Received query: {user_message}")
 
             try:
                 async for chunk in mcp_client_class.stream_query(user_message, websocket, context):
