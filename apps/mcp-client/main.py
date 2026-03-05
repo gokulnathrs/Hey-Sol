@@ -1,25 +1,116 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 from fastmcp import Client
 from fastmcp.client.transports import NodeStdioTransport
 from google import genai
 import json
 import os
+import uuid
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Optional
+from pydantic import BaseModel
 
 load_dotenv()
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- Conversation Memory Store ---
 
+MAX_HISTORY_MESSAGES = 20  # Send last N messages to LLM
+
+
+class ConversationMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+    timestamp: str
+
+
+class Conversation(BaseModel):
+    id: str
+    title: str
+    messages: list[ConversationMessage] = []
+    created_at: str
+    updated_at: str
+
+
+class ConversationStore:
+    """In-memory conversation store keyed by conversation_id."""
+
+    def __init__(self):
+        self._conversations: dict[str, Conversation] = {}
+
+    def create_conversation(self, conversation_id: Optional[str] = None, title: str = "New Chat") -> Conversation:
+        cid = conversation_id or str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        conv = Conversation(id=cid, title=title, messages=[], created_at=now, updated_at=now)
+        self._conversations[cid] = conv
+        return conv
+
+    def get_conversation(self, conversation_id: str) -> Optional[Conversation]:
+        return self._conversations.get(conversation_id)
+
+    def get_or_create(self, conversation_id: Optional[str] = None) -> Conversation:
+        if conversation_id and conversation_id in self._conversations:
+            return self._conversations[conversation_id]
+        return self.create_conversation(conversation_id)
+
+    def add_message(self, conversation_id: str, role: str, content: str):
+        conv = self._conversations.get(conversation_id)
+        if not conv:
+            conv = self.create_conversation(conversation_id)
+        now = datetime.now(timezone.utc).isoformat()
+        conv.messages.append(ConversationMessage(role=role, content=content, timestamp=now))
+        conv.updated_at = now
+        # Auto-set title from first user message
+        if role == "user" and conv.title == "New Chat":
+            conv.title = content[:50] + ("..." if len(content) > 50 else "")
+
+    def get_history_contents(self, conversation_id: str, context: Optional[str] = None) -> list:
+        """Return last N messages as Gemini Content objects."""
+        conv = self._conversations.get(conversation_id)
+        if not conv:
+            return []
+        recent = conv.messages[-MAX_HISTORY_MESSAGES:]
+        contents = []
+        for msg in recent:
+            text = msg.content
+            # Prepend context to first user message if needed
+            if msg.role == "user" and context and msg == recent[0]:
+                text = f"{context}  {text}"
+            role = "user" if msg.role == "user" else "model"
+            contents.append(genai.types.Content(
+                role=role,
+                parts=[genai.types.Part.from_text(text=text)]
+            ))
+        return contents
+
+    def list_conversations(self) -> list[dict]:
+        """Return all conversations (metadata only)."""
+        result = []
+        for conv in self._conversations.values():
+            result.append({
+                "id": conv.id,
+                "title": conv.title,
+                "messageCount": len(conv.messages),
+                "created_at": conv.created_at,
+                "updated_at": conv.updated_at,
+            })
+        # Sort by updated_at descending
+        result.sort(key=lambda x: x["updated_at"], reverse=True)
+        return result
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        if conversation_id in self._conversations:
+            del self._conversations[conversation_id]
+            return True
+        return False
+
+
+conversation_store = ConversationStore()
+
+
+# --- MCP Client ---
 
 class MCPClient:
     def __init__(self):
@@ -53,36 +144,33 @@ class MCPClient:
         tools = await convert_tools_to_genai_format(mcp_client)
         self.mcp_tools = tools
 
-    async def stream_query(self, query: str, websocket: Optional[WebSocket] = None, context: Optional[str] = None):
-        # print(f"Streaming query: {query} with context: {context}")
+    async def stream_query(
+        self,
+        query: str,
+        websocket: Optional[WebSocket] = None,
+        context: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+    ):
         if not self.session:
             raise ValueError("MCP client session is not initialized")
 
-        contents = []
-        if context:
-            full_query = f"{context}  {query}"
-            contents.append(genai.types.Content(
-                role="user",
-                parts=[genai.types.Part.from_text(text=full_query)]
-            ))
-        else:
-            contents.append(genai.types.Content(
-                role="user",
-                parts=[genai.types.Part.from_text(text=query)]
-            ))
+        # Get or create conversation and store user message
+        conv = conversation_store.get_or_create(conversation_id)
+        conversation_store.add_message(conv.id, "user", query)
+
+        # Build contents from conversation history
+        contents = conversation_store.get_history_contents(conv.id, context)
 
         try:
-            # print("Creating Gemini stream... ")
-            print(contents)
+            print(f"[Conv {conv.id}] Sending {len(contents)} messages to Gemini")
             stream = await self.genai_client.aio.models.generate_content_stream(
-            model="gemini-2.5-flash",
-            contents=contents,
-            config=genai.types.GenerateContentConfig(
-                temperature=0.5,
-                tools=self.mcp_tools,
-            ),
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=genai.types.GenerateContentConfig(
+                    temperature=0.5,
+                    tools=self.mcp_tools,
+                ),
             )
-            # print("Gemini stream created.")
         except Exception as e:
             print(f"Error creating Gemini stream: {e}")
             raise
@@ -90,9 +178,9 @@ class MCPClient:
         tool_call_part = None
         tool_name = None
         tool_args = None
+        full_response = ""
 
         async for chunk in stream:
-            # print(f"Received chunk: {chunk}")
             if chunk.candidates and chunk.candidates[0].content and getattr(chunk.candidates[0].content, "parts", None):
                 for part in chunk.candidates[0].content.parts:
                     if part is None:
@@ -111,6 +199,7 @@ class MCPClient:
                         break
                     elif getattr(part, "text", None):
                         print(f"[Streaming Text] {part.text}")
+                        full_response += part.text
                         yield part.text
 
         if tool_call_part and tool_name:
@@ -128,7 +217,7 @@ class MCPClient:
                             print("Parsed content:", parsed)
                             if parsed.get("type") == "nft-list" and "nfts" in parsed:
                                 nft_list = parsed["nfts"]
-                                print("Found NFT list in text content: ",nft_list)
+                                print("Found NFT list in text content: ", nft_list)
                             if parsed.get("type") == "transaction":
                                 tx_payload = parsed
                         elif c.type == "resource" and c.resource.mimeType == "application/json":
@@ -150,6 +239,8 @@ class MCPClient:
                         "type": "txn_signing",
                         "transaction": tx_payload
                     })
+                    tool_msg = tx_payload.get("message", f"Prepared {tx_payload.get('action', '')} transaction")
+                    full_response += tool_msg
 
                 # Send NFT list to UI
                 if nft_list and websocket:
@@ -158,6 +249,7 @@ class MCPClient:
                         "type": "nft_list",
                         "nfts": nft_list
                     })
+                    full_response += f"Found {len(nft_list)} NFTs in your wallet."
 
                 if not nft_list and not tx_payload:
                     function_response_part = genai.types.Part.from_function_response(
@@ -189,21 +281,36 @@ class MCPClient:
                             for part in follow_chunk.candidates[0].content.parts:
                                 if part.text:
                                     print(f"[Follow-up Text] {part.text}")
+                                    full_response += part.text
                                     yield part.text
-            
+
             except Exception as e:
                 function_response = {"error": str(e)}
                 print(f"[Tool Error] {e}")
+                full_response += f"Error: {str(e)}"
 
+        # Store assistant response in conversation
+        if full_response:
+            conversation_store.add_message(conv.id, "assistant", full_response)
 
 
 mcp_client_class = MCPClient()
 
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     print("Starting MCP Client...")
     await mcp_client_class.connect_to_server()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def has_format_key(schema):
@@ -249,6 +356,67 @@ async def root():
     return {"message": "Welcome to the MCP Client API"}
 
 
+# --- REST endpoints for conversation management ---
+
+@app.get("/conversations")
+async def list_conversations():
+    return conversation_store.list_conversations()
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    conv = conversation_store.get_conversation(conversation_id)
+    if not conv:
+        return {"error": "Conversation not found"}, 404
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "messages": [m.model_dump() for m in conv.messages],
+        "created_at": conv.created_at,
+        "updated_at": conv.updated_at,
+    }
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    deleted = conversation_store.delete_conversation(conversation_id)
+    return {"deleted": deleted}
+
+
+# --- Channel message endpoint (used by api-node channel system) ---
+
+class ChannelMessageRequest(BaseModel):
+    text: str
+    senderId: str
+    channelId: str
+    sessionKey: str
+    context: Optional[str] = None
+    conversationId: Optional[str] = None
+
+
+@app.post("/channel/message")
+async def channel_message(req: ChannelMessageRequest):
+    """Process a message from any channel (WhatsApp, Telegram, etc.) through the LLM."""
+    conv = conversation_store.get_or_create(req.conversationId)
+    conversation_store.add_message(conv.id, "user", req.text)
+
+    full_response = ""
+    try:
+        async for chunk in mcp_client_class.stream_query(
+            req.text, None, req.context, conv.id
+        ):
+            full_response += chunk
+    except Exception as e:
+        print(f"[Channel Message] Error: {e}")
+        return {"error": str(e), "conversationId": conv.id}
+
+    return {
+        "response": full_response,
+        "conversationId": conv.id,
+        "conversationTitle": conv.title,
+    }
+
+
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -257,12 +425,22 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             user_message = data.get('message', '')
             context = data.get('context', '')
-            print(f"Received query: {user_message}")
+            conversation_id = data.get('conversationId', None)
+            print(f"Received query: {user_message} (conv: {conversation_id})")
+
+            # Ensure conversation exists & return its id
+            conv = conversation_store.get_or_create(conversation_id)
 
             try:
-                async for chunk in mcp_client_class.stream_query(user_message, websocket, context):
+                async for chunk in mcp_client_class.stream_query(
+                    user_message, websocket, context, conv.id
+                ):
                     await websocket.send_json({"type": "stream", "text": chunk})
-                await websocket.send_json({"type": "done"})
+                await websocket.send_json({
+                    "type": "done",
+                    "conversationId": conv.id,
+                    "conversationTitle": conv.title,
+                })
             except Exception as e:
                 print(f"Error processing query: {e}")
                 await websocket.send_json({"type": "error", "text": str(e)})

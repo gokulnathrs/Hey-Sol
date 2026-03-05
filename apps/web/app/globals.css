@@ -40,10 +40,52 @@ body {
 }
 
 .grains {
-   background-image:url(/_next/static/media/grains.1ccdda41.png);
+  background-image:url(/_next/static/media/grains.1ccdda41.png);
   background-size:100px 100px;
   background-repeat:repeat;
   background-blend-mode:overlay;
   background-position:left top;
   mix-blend-mode:overlay;
+}
+
+/* Smooth scrollbar for chat */
+.scroll-smooth::-webkit-scrollbar {
+  width: 6px;
+}
+.scroll-smooth::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-smooth::-webkit-scrollbar-thumb {
+  background: rgba(153, 69, 255, 0.2);
+  border-radius: 3px;
+}
+.scroll-smooth::-webkit-scrollbar-thumb:hover {
+  background: rgba(153, 69, 255, 0.4);
+}
+
+/* Message entrance animations */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slide-in-from-bottom {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.animate-in {
+  animation: fade-in 0.3s ease-out, slide-in-from-bottom 0.3s ease-out;
+}
+
+/* Typing cursor blink animation */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Prose overrides for dark mode markdown */
+.dark .prose {
+  --tw-prose-body: var(--foreground);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-bold: var(--foreground);
+  --tw-prose-code: var(--foreground);
 }

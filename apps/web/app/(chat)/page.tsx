@@ -13,7 +13,6 @@ import Chat from "@/components/Chat";
 import Footer from "@/components/Footer";
 import Header from "@/components/Header";
 import { WalletAdapterNetwork } from "@solana/wallet-adapter-base";
-import "@solana/wallet-adapter-react-ui/styles.css";
 
 
 export default function Home() {
@@ -26,12 +25,16 @@ export default function Home() {
     <ConnectionProvider endpoint={rpc_endpoint}>
       <WalletProvider wallets={wallets} autoConnect>
         <WalletModalProvider>
-          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex flex-col h-screen z-10 relative">
-              <Header />
-              <div className="flex-1">
-                  <Chat />
+          <div className="flex flex-col h-screen z-10 relative">
+              {/* Header */}
+              <div className="absolute top-0 right-0 z-50">
+                <Header />
               </div>
-              <Footer />
+              {/* Chat takes full space */}
+              <div className="flex-1 overflow-hidden">
+                <Chat />
+              </div>
+              {/* <Footer /> */}
           </div>
           </WalletModalProvider>
         </WalletProvider>
