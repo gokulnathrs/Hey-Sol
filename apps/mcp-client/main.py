@@ -75,7 +75,7 @@ class MCPClient:
             # print("Creating Gemini stream... ")
             print(contents)
             stream = await self.genai_client.aio.models.generate_content_stream(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 temperature=0.5,
@@ -172,7 +172,7 @@ class MCPClient:
 
                     print("Resuming Gemini stream with tool output...")
                     follow_up_stream = self.genai_client.models.generate_content_stream(
-                        model="gemini-2.0-flash",
+                        model="gemini-2.5-flash",
                         contents=[
                             *contents,
                             tool_call_part,
