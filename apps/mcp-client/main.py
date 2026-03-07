@@ -66,7 +66,7 @@ class ConversationStore:
         if role == "user" and conv.title == "New Chat":
             conv.title = content[:50] + ("..." if len(content) > 50 else "")
 
-    def get_history_contents(self, conversation_id: str, context: Optional[str] = None) -> list:
+    def get_history_contents(self, conversation_id: str) -> list:
         """Return last N messages as Gemini Content objects."""
         conv = self._conversations.get(conversation_id)
         if not conv:
@@ -74,14 +74,10 @@ class ConversationStore:
         recent = conv.messages[-MAX_HISTORY_MESSAGES:]
         contents = []
         for msg in recent:
-            text = msg.content
-            # Prepend context to first user message if needed
-            if msg.role == "user" and context and msg == recent[0]:
-                text = f"{context}  {text}"
             role = "user" if msg.role == "user" else "model"
             contents.append(genai.types.Content(
                 role=role,
-                parts=[genai.types.Part.from_text(text=text)]
+                parts=[genai.types.Part.from_text(text=msg.content)]
             ))
         return contents
 
@@ -159,7 +155,7 @@ class MCPClient:
         conversation_store.add_message(conv.id, "user", query)
 
         # Build contents from conversation history
-        contents = conversation_store.get_history_contents(conv.id, context)
+        contents = conversation_store.get_history_contents(conv.id)
 
         try:
             print(f"[Conv {conv.id}] Sending {len(contents)} messages to Gemini")
@@ -169,6 +165,7 @@ class MCPClient:
                 config=genai.types.GenerateContentConfig(
                     temperature=0.5,
                     tools=self.mcp_tools,
+                    system_instruction=context if context else None,
                 ),
             )
         except Exception as e:
@@ -273,6 +270,7 @@ class MCPClient:
                         config=genai.types.GenerateContentConfig(
                             temperature=0.5,
                             tools=self.mcp_tools,
+                            system_instruction=context if context else None,
                         ),
                     )
 

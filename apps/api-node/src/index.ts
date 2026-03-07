@@ -5,12 +5,14 @@ import {
   loadRoutes,
   setReplyEngine,
   processInbound,
+  registerPlugin,
 } from './channels';
 import { ChannelAccountConfig, ChannelContract, DmPolicy } from './channels/types';
 import { WhatsAppAdapter } from './channels/whatsapp/adapter';
 import { TelegramAdapter } from './channels/telegram/adapter';
 import { WebChatAdapter } from './channels/webchat/adapter';
 import { setBridgeUrl } from './channels/whatsapp/outbound';
+import { whatsappPlugin } from './channels/whatsapp/plugin';
 
 const app = express();
 const PORT = 3002;
@@ -63,6 +65,9 @@ channelRegistry.register(whatsappAdapter);
 channelRegistry.register(telegramAdapter);
 channelRegistry.register(webChatAdapter);
 
+// Register channel plugins (composition-based API)
+registerPlugin(whatsappPlugin);
+
 initDefaultConfig("webchat", "Web Chat", true);
 initDefaultConfig("whatsapp", "WhatsApp", false);
 initDefaultConfig("telegram", "Telegram", false);
@@ -87,7 +92,13 @@ setReplyEngine(async (text, sessionKey, agentId) => {
   const convKey = `${channelId}:${peerId}`;
   const existingConvId = channelConversations.get(convKey);
 
-  try {
+  const userWalletAddress = process.env.USER_WALLET_ADDRESS || "Dvps4cVnJg2RKqYVRKzTyEf8C22wqMrF7SzJUFqbQwpo";
+  const channelContext =
+    channelId === "telegram" || channelId === "whatsapp"
+      ? `User's Solana wallet address: ${userWalletAddress}`
+      : undefined;
+
+  try { 
     const resp = await fetch(`${MCP_CLIENT_URL}/channel/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -97,6 +108,7 @@ setReplyEngine(async (text, sessionKey, agentId) => {
         channelId,
         sessionKey,
         conversationId: existingConvId || undefined,
+        context: channelContext,
       }),
     });
 

@@ -1,6 +1,36 @@
 // Channel registry — register and look up channel adapters by channelId
 
 import { ChannelContract, ChannelAccountConfig } from "./types";
+import { ChannelPlugin, ChannelId } from "./types";
+
+// ---------------------------------------------------------------------------
+// Plugin registry (new composition-based API)
+// ---------------------------------------------------------------------------
+
+const plugins = new Map<string, ChannelPlugin>();
+
+/** Register a channel plugin */
+export function registerPlugin(plugin: ChannelPlugin): void {
+  plugins.set(plugin.id.trim().toLowerCase(), plugin);
+}
+
+/** Look up a channel plugin by id */
+export function getChannelPlugin(id: ChannelId): ChannelPlugin | undefined {
+  return plugins.get(id.trim().toLowerCase());
+}
+
+/** Sorted list of all registered plugins (by meta.order, then id) */
+export function listChannelPlugins(): ChannelPlugin[] {
+  return [...plugins.values()].sort((a, b) => {
+    const orderA = a.meta.order ?? 999;
+    const orderB = b.meta.order ?? 999;
+    return orderA !== orderB ? orderA - orderB : a.id.localeCompare(b.id);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Legacy class-based registry (kept for backward compatibility)
+// ---------------------------------------------------------------------------
 
 class ChannelRegistry {
   private adapters = new Map<string, ChannelContract>();

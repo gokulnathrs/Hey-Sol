@@ -1,6 +1,8 @@
 import express from "express";
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
+  fetchLatestWaWebVersion,
   useMultiFileAuthState,
 } from "baileys";
 import { Boom } from "@hapi/boom";
@@ -24,6 +26,7 @@ app.use(express.json());
 type Status = "starting" | "qr" | "open" | "closed";
 
 let currentQrDataUrl: string | null = null;
+let currentQrString: string | null = null;   // raw string for terminal re-print
 let status: Status = "starting";
 let sock: ReturnType<typeof makeWASocket> | null = null;
 let reconnecting = false;
@@ -54,15 +57,29 @@ async function connectToWhatsApp(): Promise<void> {
   reconnecting = true;
   status = "starting";
   currentQrDataUrl = null;
+  currentQrString = null;
 
   try {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
 
+    // Fetch the current WA Web version from Meta so the Noise handshake matches
+    // what the server expects. Fall back to the bundled version on network error.
+    const { version, isLatest } = await fetchLatestWaWebVersion({}).catch(() => ({
+      version: [2, 3000, 1019707846] as [number, number, number],
+      isLatest: false,
+    }));
+    console.log(`[WhatsApp Bridge] WA Web version: ${version.join('.')} (latest: ${isLatest})`);
+
     sock = makeWASocket({
+      version,
       auth: state,
-      printQRInTerminal: true,
+      printQRInTerminal: false, // we handle QR display ourselves
       logger: silentLogger,
-      browser: ["Hey-Sol", "Chrome", "130.0.0"],
+      browser: Browsers.macOS("Chrome"),
+      // Give the user enough time to scan the QR before timing out
+      connectTimeoutMs: 60_000,
+      // Reduce message history sync to speed up initial connection
+      syncFullHistory: false,
     });
 
     sock.ev.on("connection.update", async (update) => {
@@ -70,39 +87,59 @@ async function connectToWhatsApp(): Promise<void> {
 
       if (qr) {
         status = "qr";
-        retryCount = 0; // reset backoff when we get a fresh QR
+        retryCount = 0; // reset backoff on a fresh QR
+        currentQrString = qr;
         currentQrDataUrl = await QRCode.toDataURL(qr);
-        console.log("[WhatsApp Bridge] QR ready — scan with WhatsApp on your phone.");
+
+        // Print QR to terminal so dev can scan without an HTTP client
+        try {
+          const terminalQr = await QRCode.toString(qr, { type: "terminal", small: true });
+          console.log("\n[WhatsApp Bridge] Scan this QR with WhatsApp on your phone:\n");
+          console.log(terminalQr);
+          console.log("[WhatsApp Bridge] Or fetch it as an image: GET http://localhost:" + PORT + "/qr\n");
+        } catch {
+          console.log("[WhatsApp Bridge] QR ready — fetch: GET http://localhost:" + PORT + "/qr");
+        }
       }
 
       if (connection === "close") {
         status = "closed";
         currentQrDataUrl = null;
+        currentQrString = null;
         reconnecting = false;
 
-        const code = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        const shouldReconnect = code !== DisconnectReason.loggedOut;
+        const boom = lastDisconnect?.error as Boom | undefined;
+        const code = boom?.output?.statusCode;
+        const boomMessage = boom?.message ?? boom?.output?.payload?.message ?? '';
 
         console.log(
-          `[WhatsApp Bridge] Disconnected (code ${code}). Reconnect: ${shouldReconnect}`
+          `[WhatsApp Bridge] Disconnected (code ${code}: ${boomMessage}). Reconnect: ${code !== DisconnectReason.loggedOut}`
         );
 
-        // 405 = method not allowed / stale session — clear auth and retry fresh
-        // 515 = restart required — same treatment
-        if (code === 405 || code === 515) {
+        if (code === DisconnectReason.loggedOut) {
+          // Explicit logout — clear credentials so next start shows QR
           clearAuthState();
+          console.log("[WhatsApp Bridge] Logged out. Restart the bridge to pair again.");
+          return;
         }
 
-        if (shouldReconnect) {
-          const delay = getRetryDelay();
-          console.log(`[WhatsApp Bridge] Reconnecting in ${delay}ms…`);
-          setTimeout(connectToWhatsApp, delay);
+        // badSession (500) — credentials are corrupt, must re-pair
+        if (code === DisconnectReason.badSession) {
+          clearAuthState();
+          console.log("[WhatsApp Bridge] Bad session, credentials cleared. Will re-pair.");
         }
+
+        // All other codes (405 connectionReplaced, 408 timedOut, 503, etc.)
+        // do NOT clear auth — just reconnect and show a fresh QR if needed
+        const delay = getRetryDelay();
+        console.log(`[WhatsApp Bridge] Reconnecting in ${delay}ms…`);
+        setTimeout(connectToWhatsApp, delay);
       }
 
       if (connection === "open") {
         status = "open";
         currentQrDataUrl = null;
+        currentQrString = null;
         reconnecting = false;
         retryCount = 0;
         console.log("[WhatsApp Bridge] Connected to WhatsApp!");
@@ -181,10 +218,25 @@ app.get("/status", (_req, res) => {
 /** Return the current QR code as a base64 PNG data URL */
 app.get("/qr", (_req, res) => {
   if (!currentQrDataUrl) {
-    res.status(404).json({ error: "No QR code available" });
+    res.status(404).json({ error: "No QR code available", status });
     return;
   }
-  res.json({ qr: currentQrDataUrl });
+  res.json({ qr: currentQrDataUrl, raw: currentQrString });
+});
+
+/** Return QR as terminal-friendly ASCII art (curl-friendly) */
+app.get("/qr/terminal", async (_req, res) => {
+  if (!currentQrString) {
+    res.status(404).send("No QR code available (status: " + status + ")\n");
+    return;
+  }
+  try {
+    const ascii = await QRCode.toString(currentQrString, { type: "terminal", small: true });
+    res.setHeader("Content-Type", "text/plain");
+    res.send(ascii);
+  } catch (err) {
+    res.status(500).send("Failed to render QR\n");
+  }
 });
 
 /** Send a WhatsApp message — called by api-node outbound */

@@ -42,6 +42,126 @@ export interface SignablePayload {
   metadata?: Record<string, any>;
 }
 
+const STORAGE_KEY = (id: string) => `hey-sol:conversation:${id}`;
+const NEW_CONV_KEY = "hey-sol:conversation:new";
+
+const serializeMessages = (msgs: Message[]) =>
+  JSON.stringify(msgs.map((m) => ({ ...m, timestamp: m.timestamp.toISOString() })));
+
+const deserializeMessages = (raw: string): Message[] =>
+  JSON.parse(raw).map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) }));
+
+const Greeting = () => (
+  <div className="flex flex-col justify-center items-center gap-8 mt-16 lg:mt-24 px-4">
+    <HeySol />
+    <p className="text-3xl lg:text-5xl font-darker-grotesque font-medium text-foreground/90 text-center">
+      Welcome! Ready to explore?
+    </p>
+  </div>
+);
+
+type MessagesProps = {
+  messages: Message[];
+  chatContainerRef: React.RefObject<HTMLDivElement | null>;
+  messagesEndRef: React.RefObject<HTMLDivElement | null>;
+  handleScroll: () => void;
+  handleSignAndSend: (payload: SignablePayload) => void;
+};
+
+const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, handleSignAndSend }: MessagesProps) => (
+  <div
+    ref={chatContainerRef}
+    onScroll={handleScroll}
+    className="flex-1 overflow-y-auto py-4 pb-8 px-2 lg:px-4 scroll-smooth"
+    style={{ scrollbarWidth: "thin", scrollbarColor: "rgba(153,69,255,0.2) transparent" }}
+  >
+    <div className="flex flex-col gap-3 max-w-3xl mx-auto">
+      {messages.map((m) => {
+        if (m.sender === "bot" && m.text === "" && !m.isStreaming) return null;
+
+        return (
+          <div
+            key={m.id}
+            className={`flex gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300 ${
+              m.sender === "user" ? "flex-row-reverse" : "flex-row"
+            }`}
+          >
+            {/* Avatar */}
+            <div
+              className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1 ${
+                m.sender === "user"
+                  ? "bg-sol-purple/20 text-sol-purple"
+                  : "bg-sol-green/20 text-sol-green"
+              }`}
+            >
+              {m.sender === "user" ? (
+                <User className="size-4" />
+              ) : (
+                <Bot className="size-4" />
+              )}
+            </div>
+
+            {/* Message bubble */}
+            <div
+              className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                m.sender === "user"
+                  ? "bg-sol-purple/15 border border-sol-purple/20"
+                  : "bg-foreground/5 border border-foreground/10"
+              }`}
+            >
+              {m.sender === "bot" ? (
+                <>
+                  <MarkdownMessage content={m.text} isBot />
+                  {m.isStreaming && m.text === "" && (
+                    <div className="flex items-center gap-2 text-foreground/40">
+                      <Loader2 className="size-4 animate-spin" />
+                      <span className="text-sm">Thinking...</span>
+                    </div>
+                  )}
+                  {m.isStreaming && m.text !== "" && (
+                    <span className="inline-block w-2 h-5 bg-sol-green/70 animate-pulse rounded-sm ml-0.5" />
+                  )}
+                </>
+              ) : (
+                <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                  {m.text}
+                </p>
+              )}
+
+              {m.signablePayload && (
+                <button
+                  onClick={() => handleSignAndSend(m.signablePayload!)}
+                  className="mt-3 px-4 py-2 bg-gradient-to-r from-sol-purple to-sol-purple/90 text-white rounded-xl
+                             text-sm font-medium cursor-pointer hover:opacity-90 transition-opacity"
+                >
+                  Sign & Confirm {m.signablePayload.action}
+                </button>
+              )}
+
+              {m.nfts && m.nfts.length > 0 && (
+                <div className="mt-4 flex gap-3 overflow-x-auto max-w-[700px] pb-2">
+                  {m.nfts.map((nft, idx) => (
+                    <NFTCard key={nft.mint + idx} nft={nft} />
+                  ))}
+                </div>
+              )}
+
+              {/* Timestamp */}
+              <p className="text-[10px] text-foreground/30 mt-2">
+                {m.timestamp.toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </p>
+            </div>
+          </div>
+        );
+      })}
+      <div ref={messagesEndRef} />
+    </div>
+  </div>
+);
+
 const ChatInterface = () => {
   const { sendTransaction, publicKey } = useWallet();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -60,85 +180,32 @@ const ChatInterface = () => {
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
 
+  // Persist messages to localStorage whenever they change
+  useEffect(() => {
+    const settled = messages.filter((m) => !m.isStreaming);
+    if (settled.length === 0) return;
+    const key = conversationId ? STORAGE_KEY(conversationId) : NEW_CONV_KEY;
+    try {
+      localStorage.setItem(key, serializeMessages(settled));
+    } catch {}
+  }, [messages, conversationId]);
+
+  // On mount, restore any in-progress new conversation from localStorage
+  useEffect(() => {
+    if (conversationId) return;
+    try {
+      const stored = localStorage.getItem(NEW_CONV_KEY);
+      if (stored) setMessages(deserializeMessages(stored));
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const quickActions = [
     { label: "Send SOL", icon: <Rocket className="size-4" /> },
     { label: "List NFTs", icon: <AudioWaveform className="size-4" /> },
     { label: "Get Balance", icon: <Replace className="size-4" /> },
     { label: "View Transactions", icon: <ScanSearch className="size-4" /> },
   ];
-
-  // Track whether the user is scrolled near the bottom
-  const handleScroll = useCallback(() => {
-    const el = chatContainerRef.current;
-    if (!el) return;
-    const threshold = 120;
-    isNearBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
-  }, []);
-
-  // Auto-scroll only when user is near bottom or during streaming
-  useEffect(() => {
-    const isStreaming = messages.some((m) => m.isStreaming);
-    if (isNearBottomRef.current || isStreaming) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages]);
-
-  // Fetch conversation list on mount
-  const fetchConversations = useCallback(async () => {
-    try {
-      const res = await fetch(`${MCP_API_URL}/conversations`);
-      const data = await res.json();
-      setConversations(data);
-    } catch (err) {
-      console.error("Failed to fetch conversations:", err);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchConversations();
-  }, [fetchConversations]);
-
-  // Load a conversation's messages
-  const loadConversation = async (id: string) => {
-    try {
-      const res = await fetch(`${MCP_API_URL}/conversations/${id}`);
-      const data = await res.json();
-      if (data.messages) {
-        setMessages(
-          data.messages.map((m: any, i: number) => ({
-            id: `${id}-${i}`,
-            text: m.content,
-            sender: m.role === "user" ? "user" : "bot",
-            timestamp: new Date(m.timestamp),
-          }))
-        );
-      }
-      setConversationId(id);
-      setSidebarOpen(false);
-    } catch (err) {
-      console.error("Failed to load conversation:", err);
-    }
-  };
-
-  const handleNewConversation = () => {
-    setConversationId(null);
-    setMessages([]);
-    setLastMessage("");
-    setSidebarOpen(false);
-  };
-
-  const handleDeleteConversation = async (id: string) => {
-    try {
-      await fetch(`${MCP_API_URL}/conversations/${id}`, { method: "DELETE" });
-      if (conversationId === id) {
-        handleNewConversation();
-      }
-      fetchConversations();
-    } catch (err) {
-      console.error("Failed to delete conversation:", err);
-    }
-  };
 
   const handleSignAndSend = async (payload: SignablePayload) => {
     if (!payload.txMessageBase64) return;
@@ -279,6 +346,14 @@ const ChatInterface = () => {
           // Update conversation ID if returned
           if (resp.conversationId) {
             setConversationId(resp.conversationId);
+            // Migrate "new" localStorage data to its permanent key
+            try {
+              const newData = localStorage.getItem(NEW_CONV_KEY);
+              if (newData) {
+                localStorage.setItem(STORAGE_KEY(resp.conversationId), newData);
+                localStorage.removeItem(NEW_CONV_KEY);
+              }
+            } catch {}
           }
 
           setIsLoading(false);
@@ -323,109 +398,94 @@ const ChatInterface = () => {
     setLastMessage("");
   };
 
-  const Greeting = () => (
-    <div className="flex flex-col justify-center items-center gap-8 mt-16 lg:mt-24 px-4">
-      <HeySol />
-      <p className="text-3xl lg:text-5xl font-darker-grotesque font-medium text-foreground/90 text-center">
-        Welcome! Ready to explore?
-      </p>
-    </div>
-  );
+  // Track whether the user is scrolled near the bottom
+  const handleScroll = useCallback(() => {
+    const el = chatContainerRef.current;
+    if (!el) return;
+    const threshold = 120;
+    isNearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  }, []);
 
-  const Messages = ({ messages }: { messages: Message[] }) => (
-    <div
-      ref={chatContainerRef}
-      onScroll={handleScroll}
-      className="flex-1 overflow-y-auto py-4 pb-8 px-2 lg:px-4 scroll-smooth"
-      style={{ scrollbarWidth: "thin", scrollbarColor: "rgba(153,69,255,0.2) transparent" }}
-    >
-      <div className="flex flex-col gap-3 max-w-3xl mx-auto">
-        {messages.map((m) => {
-          // Don't render empty streaming messages that haven't received any text yet
-          if (m.sender === "bot" && m.text === "" && !m.isStreaming) return null;
+  // Auto-scroll only when user is near bottom or during streaming
+  useEffect(() => {
+    const isStreaming = messages.some((m) => m.isStreaming);
+    if (isNearBottomRef.current || isStreaming) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
 
-          return (
-            <div
-              key={m.id}
-              className={`flex gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300 ${
-                m.sender === "user" ? "flex-row-reverse" : "flex-row"
-              }`}
-            >
-              {/* Avatar */}
-              <div
-                className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1 ${
-                  m.sender === "user"
-                    ? "bg-sol-purple/20 text-sol-purple"
-                    : "bg-sol-green/20 text-sol-green"
-                }`}
-              >
-                {m.sender === "user" ? (
-                  <User className="size-4" />
-                ) : (
-                  <Bot className="size-4" />
-                )}
-              </div>
+  // Fetch conversation list on mount
+  const fetchConversations = useCallback(async () => {
+    try {
+      const res = await fetch(`${MCP_API_URL}/conversations`);
+      const data = await res.json();
+      setConversations(data);
+    } catch (err) {
+      console.error("Failed to fetch conversations:", err);
+    }
+  }, []);
 
-              {/* Message bubble */}
-              <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                  m.sender === "user"
-                    ? "bg-sol-purple/15 border border-sol-purple/20"
-                    : "bg-foreground/5 border border-foreground/10"
-                }`}
-              >
-                {m.sender === "bot" ? (
-                  <>
-                    <MarkdownMessage content={m.text} isBot />
-                    {m.isStreaming && m.text === "" && (
-                      <div className="flex items-center gap-2 text-foreground/40">
-                        <Loader2 className="size-4 animate-spin" />
-                        <span className="text-sm">Thinking...</span>
-                      </div>
-                    )}
-                    {m.isStreaming && m.text !== "" && (
-                      <span className="inline-block w-2 h-5 bg-sol-green/70 animate-pulse rounded-sm ml-0.5" />
-                    )}
-                  </>
-                ) : (
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                    {m.text}
-                  </p>
-                )}
+  useEffect(() => {
+    fetchConversations();
+  }, [fetchConversations]);
 
-                {m.signablePayload && (
-                  <button
-                    onClick={() => handleSignAndSend(m.signablePayload!)}
-                    className="mt-3 px-4 py-2 bg-gradient-to-r from-sol-purple to-sol-purple/90 text-white rounded-xl
-                               text-sm font-medium cursor-pointer hover:opacity-90 transition-opacity"
-                  >
-                    Sign & Confirm {m.signablePayload.action}
-                  </button>
-                )}
+  // Load a conversation's messages
+  const loadConversation = async (id: string) => {
+    // Prefer localStorage (has full rich data: nfts, signablePayload, etc.)
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY(id));
+      if (stored) {
+        setMessages(deserializeMessages(stored));
+        setConversationId(id);
+        setSidebarOpen(false);
+        return;
+      }
+    } catch {}
 
-                {m.nfts && m.nfts.length > 0 && (
-                  <div className="mt-4 flex gap-3 overflow-x-auto max-w-[700px] pb-2">
-                    {m.nfts.map((nft, idx) => (
-                      <NFTCard key={nft.mint + idx} nft={nft} />
-                    ))}
-                  </div>
-                )}
+    // Fallback: reconstruct from server (text only)
+    try {
+      const res = await fetch(`${MCP_API_URL}/conversations/${id}`);
+      const data = await res.json();
+      if (data.messages) {
+        setMessages(
+          data.messages.map((m: any, i: number) => ({
+            id: `${id}-${i}`,
+            text: m.content,
+            sender: m.role === "user" ? "user" : "bot",
+            timestamp: new Date(m.timestamp),
+          }))
+        );
+      }
+      setConversationId(id);
+      setSidebarOpen(false);
+    } catch (err) {
+      console.error("Failed to load conversation:", err);
+    }
+  };
 
-                {/* Timestamp */}
-                <p className="text-[10px] text-foreground/30 mt-2">
-                  {m.timestamp.toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </p>
-              </div>
-            </div>
-          );
-        })}
-        <div ref={messagesEndRef} />
-      </div>
-    </div>
-  );
+  const handleNewConversation = () => {
+    setConversationId(null);
+    setMessages([]);
+    setLastMessage("");
+    setSidebarOpen(false);
+    try { localStorage.removeItem(NEW_CONV_KEY); } catch {}
+  };
+
+  const handleDeleteConversation = async (id: string) => {
+    try {
+      await fetch(`${MCP_API_URL}/conversations/${id}`, { method: "DELETE" });
+      try { localStorage.removeItem(STORAGE_KEY(id)); } catch {}
+      if (conversationId === id) {
+        handleNewConversation();
+      }
+      fetchConversations();
+    } catch (err) {
+      console.error("Failed to delete conversation:", err);
+    }
+  };
+
+  const handleSignAndSendStable = useCallback(handleSignAndSend, [publicKey, sendTransaction]);
 
   return (
     <div className="flex h-screen">
@@ -469,7 +529,13 @@ const ChatInterface = () => {
           {messages.filter((m) => m.text || m.isStreaming).length === 0 ? (
             <Greeting />
           ) : (
-            <Messages messages={messages} />
+            <Messages
+              messages={messages}
+              chatContainerRef={chatContainerRef}
+              messagesEndRef={messagesEndRef}
+              handleScroll={handleScroll}
+              handleSignAndSend={handleSignAndSendStable}
+            />
           )}
         </div>
 
