@@ -1,12 +1,8 @@
 
 import { z } from "zod";
 import * as dotenv from "dotenv";
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
-import bs58 from "bs58";
+import { Connection, LAMPORTS_PER_SOL, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Address, appendTransactionMessageInstruction, compileTransactionMessage, createKeyPairSignerFromBytes, createSolanaRpc, createSolanaRpcSubscriptions, createTransactionMessage, generateKeyPairSigner, getSignatureFromTransaction, lamports, pipe, sendAndConfirmTransactionFactory, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners, TransactionSigner } from "@solana/kit";
-import { getTransferSolInstruction } from "@solana-program/system";
-import { string } from "zod/v4";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
 import { publicKey } from "@metaplex-foundation/umi";
@@ -18,7 +14,6 @@ dotenv.config();
 // Validate required environment variables
 function validateEnvironment() {
   const requiredEnvVars = {
-    SOLANA_PRIVATE_KEY: process.env.SOLANA_PRIVATE_KEY,
     RPC_URL: process.env.RPC_URL,
   };
 
@@ -33,67 +28,26 @@ function validateEnvironment() {
   }
 }
 
-async function send_sol(amount: string, address: string){
-  try {
-    const rpcUrl = process.env.RPC_URL;
-    const rpcSubscriptions = createSolanaRpcSubscriptions(process.env.WS_RPC_URL as string);
-    const rpc = createSolanaRpc(rpcUrl as string)
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  worker: (item: T) => Promise<R>,
+  concurrency = 5
+): Promise<R[]> {
+  const safeConcurrency = Math.max(1, concurrency);
+  const results: R[] = new Array(items.length);
+  let next = 0;
 
-    const privateKey = bs58.decode(process.env.SOLANA_PRIVATE_KEY as string)
-    
-    const recepient = address as Address<string> ;
-    const user = await createKeyPairSignerFromBytes(new Uint8Array(privateKey))
-
-    const { value: latestBlockHash } = await rpc.getLatestBlockhash().send();
-
-    const lamportAmount = Math.floor(parseFloat(amount) * LAMPORTS_PER_SOL);
-
-    const transactionMessage = pipe(
-      createTransactionMessage({ version: 0}),
-      tx => setTransactionMessageFeePayer(user.address, tx),
-      tx => setTransactionMessageLifetimeUsingBlockhash(latestBlockHash, tx),
-      tx => appendTransactionMessageInstruction(
-        getTransferSolInstruction({
-          amount: lamports(BigInt(lamportAmount)),
-          destination: recepient,
-          source: user
-        }),
-        tx
-      )
-    )
-
-    const signedTxn = await signTransactionMessageWithSigners(transactionMessage)
-    const sendAndConfirmTransaction = sendAndConfirmTransactionFactory({ rpc, rpcSubscriptions })
-
-    try {
-      await sendAndConfirmTransaction(
-        signedTxn,
-        {
-          commitment: 'confirmed', skipPreflight: true
-        }
-      )
-
-      const signature = getSignatureFromTransaction(signedTxn)
-      console.log('✅ - Transfer transaction:', signature);
-      return {
-        status: "success",
-        signature
-      }
-    } catch (e) {
-        console.error('Transfer failed:', e);
-        return {
-          status: "failed",
-          message: "Transfer failed"
-        }
+  const runners = Array.from({ length: Math.min(safeConcurrency, items.length) }, async () => {
+    while (true) {
+      const current = next;
+      next += 1;
+      if (current >= items.length) break;
+      results[current] = await worker(items[current]);
     }
+  });
 
-  } catch (error) {
-    console.error("Failed==> ",error)
-    return {
-          status: "failed",
-          message: "Send_SOL Function failed"
-        }
-  }
+  await Promise.all(runners);
+  return results;
 }
 
 async function main() {
@@ -120,21 +74,29 @@ async function main() {
       async ({ amount, address, sender }) => {
         try {
           const rpcUrl = process.env.RPC_URL as string;
-          const rpc = createSolanaRpc(rpcUrl);
+          const connection = new Connection(rpcUrl, "confirmed");
+
+          const parsedAmount = Number(amount);
+          if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+            throw new Error("amount must be a positive number");
+          }
+
+          const senderKey = new PublicKey(sender);
+          const recipientKey = new PublicKey(address);
 
           // Get latest blockhash
-          const { value: latestBlockHash } = await rpc.getLatestBlockhash().send();
+          const latestBlockHash = await connection.getLatestBlockhash("confirmed");
 
-          const lamportAmount = Math.floor(parseFloat(amount) * LAMPORTS_PER_SOL);
+          const lamportAmount = Math.floor(parsedAmount * LAMPORTS_PER_SOL);
 
           // Build transaction message (unsigned)
           const compiledMessage = new TransactionMessage({
-            payerKey: new PublicKey(sender),
+            payerKey: senderKey,
             recentBlockhash: latestBlockHash.blockhash,
             instructions: [
               SystemProgram.transfer({
-                fromPubkey: new PublicKey(sender),
-                toPubkey: new PublicKey(address),
+                fromPubkey: senderKey,
+                toPubkey: recipientKey,
                 lamports: lamportAmount,
               })
             ],
@@ -192,18 +154,17 @@ async function main() {
             );
           }
 
-          const nftDetails: any[] = [];
-          for (const nft of filtered) {
+          const nftDetails = await mapWithConcurrency(filtered, async (nft) => {
             const metadata = await fetchMetadata(nft.uri);
-            nftDetails.push({
+            return {
               mint: nft.publicKey.toString(),
               name: nft.name,
               uri: nft.uri,
               image: metadata?.image || null,
               description: metadata?.description || null,
               attributes: metadata?.attributes || [],
-            });
-          }
+            };
+          }, 6);
 
           return {
             content: [

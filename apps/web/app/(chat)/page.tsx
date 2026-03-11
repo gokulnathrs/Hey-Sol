@@ -19,7 +19,7 @@ export default function Home() {
 
   const network = WalletAdapterNetwork.Devnet;
   const wallets = [new PhantomWalletAdapter()];
-  const rpc_endpoint = "https://devnet.helius-rpc.com/?api-key=ae52df4b-28e0-41d2-b733-e6eb16617512";
+  const rpc_endpoint = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "https://api.devnet.solana.com";
 
   return (
     <ConnectionProvider endpoint={rpc_endpoint}>

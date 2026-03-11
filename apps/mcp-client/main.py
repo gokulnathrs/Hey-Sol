@@ -1,5 +1,6 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from fastmcp import Client
@@ -11,13 +12,49 @@ import uuid
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
 # --- Conversation Memory Store ---
 
 MAX_HISTORY_MESSAGES = 20  # Send last N messages to LLM
+MAX_STORED_CONVERSATIONS = int(os.getenv("MAX_STORED_CONVERSATIONS", "500"))
+MAX_MESSAGES_PER_CONVERSATION = int(os.getenv("MAX_MESSAGES_PER_CONVERSATION", "200"))
+MCP_CLIENT_API_KEY = os.getenv("MCP_CLIENT_API_KEY")
+RATE_LIMIT_WINDOW_MS = int(os.getenv("MCP_RATE_LIMIT_WINDOW_MS", "60000"))
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("MCP_RATE_LIMIT_MAX_REQUESTS", "120"))
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+
+rate_limit_store: dict[str, dict[str, int]] = {}
+
+
+def is_authorized(api_key: Optional[str], authorization_header: Optional[str]) -> bool:
+    if not MCP_CLIENT_API_KEY:
+        return True
+    if api_key == MCP_CLIENT_API_KEY:
+        return True
+    if authorization_header and authorization_header.startswith("Bearer "):
+        return authorization_header[7:] == MCP_CLIENT_API_KEY
+    return False
+
+
+def check_rate_limit(identity: str) -> bool:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    bucket = rate_limit_store.get(identity)
+    if not bucket or now_ms > bucket["reset_at"]:
+        rate_limit_store[identity] = {"count": 1, "reset_at": now_ms + RATE_LIMIT_WINDOW_MS}
+        return True
+
+    if bucket["count"] >= RATE_LIMIT_MAX_REQUESTS:
+        return False
+
+    bucket["count"] += 1
+    return True
 
 
 class ConversationMessage(BaseModel):
@@ -29,7 +66,7 @@ class ConversationMessage(BaseModel):
 class Conversation(BaseModel):
     id: str
     title: str
-    messages: list[ConversationMessage] = []
+    messages: list[ConversationMessage] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
@@ -45,6 +82,7 @@ class ConversationStore:
         now = datetime.now(timezone.utc).isoformat()
         conv = Conversation(id=cid, title=title, messages=[], created_at=now, updated_at=now)
         self._conversations[cid] = conv
+        self._prune_conversations()
         return conv
 
     def get_conversation(self, conversation_id: str) -> Optional[Conversation]:
@@ -61,6 +99,8 @@ class ConversationStore:
             conv = self.create_conversation(conversation_id)
         now = datetime.now(timezone.utc).isoformat()
         conv.messages.append(ConversationMessage(role=role, content=content, timestamp=now))
+        if len(conv.messages) > MAX_MESSAGES_PER_CONVERSATION:
+            conv.messages = conv.messages[-MAX_MESSAGES_PER_CONVERSATION:]
         conv.updated_at = now
         # Auto-set title from first user message
         if role == "user" and conv.title == "New Chat":
@@ -101,6 +141,18 @@ class ConversationStore:
             del self._conversations[conversation_id]
             return True
         return False
+
+    def _prune_conversations(self):
+        overflow = len(self._conversations) - MAX_STORED_CONVERSATIONS
+        if overflow <= 0:
+            return
+
+        sorted_items = sorted(
+            self._conversations.items(),
+            key=lambda pair: pair[1].updated_at,
+        )
+        for conv_id, _ in sorted_items[:overflow]:
+            self._conversations.pop(conv_id, None)
 
 
 conversation_store = ConversationStore()
@@ -238,6 +290,20 @@ class MCPClient:
                     })
                     tool_msg = tx_payload.get("message", f"Prepared {tx_payload.get('action', '')} transaction")
                     full_response += tool_msg
+                elif tx_payload and not websocket:
+                    # Channel mode (WhatsApp / Telegram) — produce readable text
+                    action = tx_payload.get("action", "transaction")
+                    amount = tx_payload.get("amount", "")
+                    token = tx_payload.get("token", "SOL")
+                    recipient = tx_payload.get("recipient", "")
+                    tool_msg = tx_payload.get(
+                        "message",
+                        f"Transaction prepared: {action} {amount} {token}" +
+                        (f" to {recipient}" if recipient else "") +
+                        ". Please open the Hey-Sol web app to review and sign this transaction."
+                    )
+                    full_response += tool_msg
+                    yield tool_msg
 
                 # Send NFT list to UI
                 if nft_list and websocket:
@@ -247,6 +313,14 @@ class MCPClient:
                         "nfts": nft_list
                     })
                     full_response += f"Found {len(nft_list)} NFTs in your wallet."
+                elif nft_list and not websocket:
+                    # Channel mode — summarise NFT list as readable text
+                    names = [n.get("name") or n.get("symbol") or "Unknown" for n in nft_list[:10]]
+                    summary = ", ".join(names)
+                    suffix = f" (and {len(nft_list) - 10} more)" if len(nft_list) > 10 else ""
+                    nft_msg = f"You own {len(nft_list)} NFT(s): {summary}{suffix}."
+                    full_response += nft_msg
+                    yield nft_msg
 
                 if not nft_list and not tx_payload:
                     function_response_part = genai.types.Part.from_function_response(
@@ -260,7 +334,7 @@ class MCPClient:
                     )
 
                     print("Resuming Gemini stream with tool output...")
-                    follow_up_stream = self.genai_client.models.generate_content_stream(
+                    follow_up_stream = await self.genai_client.aio.models.generate_content_stream(
                         model="gemini-2.5-flash",
                         contents=[
                             *contents,
@@ -274,7 +348,7 @@ class MCPClient:
                         ),
                     )
 
-                    for follow_chunk in follow_up_stream:
+                    async for follow_chunk in follow_up_stream:
                         if follow_chunk.candidates:
                             for part in follow_chunk.candidates[0].content.parts:
                                 if part.text:
@@ -285,11 +359,20 @@ class MCPClient:
             except Exception as e:
                 function_response = {"error": str(e)}
                 print(f"[Tool Error] {e}")
-                full_response += f"Error: {str(e)}"
+                error_msg = f"Sorry, I ran into an error: {str(e)}"
+                full_response += error_msg
+                yield error_msg
+
+        # Guard: if we still have no response (e.g. tool returned data but
+        # no text path was hit), emit a generic fallback so channels never
+        # receive an empty reply.
+        if not full_response:
+            fallback = "I processed your request but couldn't format a response for this channel. Please try the Hey-Sol web app for full results."
+            full_response = fallback
+            yield fallback
 
         # Store assistant response in conversation
-        if full_response:
-            conversation_store.add_message(conv.id, "assistant", full_response)
+        conversation_store.add_message(conv.id, "assistant", full_response)
 
 
 mcp_client_class = MCPClient()
@@ -304,11 +387,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def auth_and_rate_limit(request: Request, call_next):
+    if request.url.path == "/":
+        return await call_next(request)
+
+    if not is_authorized(request.headers.get("x-api-key"), request.headers.get("authorization")):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+    identity = request.client.host if request.client else "unknown"
+    if not check_rate_limit(identity):
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+
+    return await call_next(request)
 
 
 def has_format_key(schema):
@@ -365,7 +463,7 @@ async def list_conversations():
 async def get_conversation(conversation_id: str):
     conv = conversation_store.get_conversation(conversation_id)
     if not conv:
-        return {"error": "Conversation not found"}, 404
+        raise HTTPException(status_code=404, detail="Conversation not found")
     return {
         "id": conv.id,
         "title": conv.title,
@@ -417,6 +515,15 @@ async def channel_message(req: ChannelMessageRequest):
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
+    if not is_authorized(websocket.headers.get("x-api-key"), websocket.headers.get("authorization")):
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
+    identity = websocket.client.host if websocket.client else "unknown"
+    if not check_rate_limit(identity):
+        await websocket.close(code=1008, reason="Rate limit exceeded")
+        return
+
     await websocket.accept()
     try:
         while True:
@@ -452,5 +559,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="localhost", port=8002, log_level="info")
-    print("Server started at http://localhost:8002")
+    host = os.getenv("MCP_CLIENT_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_CLIENT_PORT", "8002"))
+    uvicorn.run(app, host=host, port=port, log_level="info")
+    print(f"Server started at http://{host}:{port}")

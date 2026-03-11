@@ -173,7 +173,7 @@ export class TelegramAdapter implements ChannelContract {
       const result = await this.apiCall("sendMessage", {
         chat_id: isNaN(Number(chatId)) ? `@${chatId}` : Number(chatId),
         text: message.text || "",
-        parse_mode: "Markdown",
+        parse_mode: undefined,
       });
 
       return { success: true, messageId: String(result.message_id) };

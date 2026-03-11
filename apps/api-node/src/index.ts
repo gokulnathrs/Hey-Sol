@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import {
   channelRegistry,
@@ -15,13 +15,93 @@ import { setBridgeUrl } from './channels/whatsapp/outbound';
 import { whatsappPlugin } from './channels/whatsapp/plugin';
 
 const app = express();
-const PORT = 3002;
+const PORT = Number(process.env.PORT || 3002);
 const MCP_CLIENT_URL = process.env.MCP_CLIENT_URL || "http://localhost:8002";
+const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "512kb";
+const API_KEY = process.env.API_NODE_API_KEY;
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120);
+const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3000";
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || "";
+
+const allowedCorsOrigins = (process.env.CORS_ORIGINS || "http://localhost:3000")
+  .split(",")
+  .map((v) => v.trim())
+  .filter(Boolean);
+
+const allowedBridgeHosts = (process.env.WHATSAPP_BRIDGE_ALLOWED_HOSTS || "localhost,127.0.0.1,whatsapp-bridge")
+  .split(",")
+  .map((v) => v.trim().toLowerCase())
+  .filter(Boolean);
+
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+function securityHeaders(_req: Request, res: Response, next: NextFunction) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+}
+
+function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
+  if (!API_KEY) return next();
+  if (req.path === "/hello") return next();
+
+  const headerKey = req.header("x-api-key");
+  const auth = req.header("authorization");
+  const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
+
+  if (headerKey === API_KEY || bearer === API_KEY) {
+    return next();
+  }
+
+  res.status(401).json({ error: "Unauthorized" });
+}
+
+function rateLimit(req: Request, res: Response, next: NextFunction) {
+  const key = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const current = rateLimitStore.get(key);
+
+  if (!current || now > current.resetAt) {
+    rateLimitStore.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return next();
+  }
+
+  if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
+    res.status(429).json({ error: "Too many requests" });
+    return;
+  }
+
+  current.count += 1;
+  rateLimitStore.set(key, current);
+  next();
+}
+
+function isAllowedBridgeUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return allowedBridgeHosts.includes(host);
+  } catch {
+    return false;
+  }
+}
 
 let activeBridgeUrl: string | null = null;
 
-app.use(express.json());
-app.use(cors());
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+app.use(securityHeaders);
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedCorsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+}));
+app.use(apiKeyAuth);
+app.use(rateLimit);
 
 // --- Channel configuration store (in-memory) ---
 
@@ -80,6 +160,29 @@ loadRoutes([
 
 // --- Reply engine that calls MCP client ---
 
+/**
+ * Resolve the managed wallet public key for a (channelId, senderId) pair
+ * by calling the web app's internal API.  Returns null if not linked.
+ */
+async function resolveChannelWallet(channelId: string, senderId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${WALLET_SERVICE_URL}/api/channel/resolve-wallet`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": INTERNAL_API_KEY,
+      },
+      body: JSON.stringify({ channelId, senderId }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { publicKey?: string | null };
+    return data.publicKey ?? null;
+  } catch {
+    return null;
+  }
+}
+
 setReplyEngine(async (text, sessionKey, agentId) => {
   console.log(`[ReplyEngine] agent=${agentId}, session=${sessionKey}, text="${text.substring(0, 60)}"`);
 
@@ -92,16 +195,23 @@ setReplyEngine(async (text, sessionKey, agentId) => {
   const convKey = `${channelId}:${peerId}`;
   const existingConvId = channelConversations.get(convKey);
 
-  const userWalletAddress = process.env.USER_WALLET_ADDRESS || "Dvps4cVnJg2RKqYVRKzTyEf8C22wqMrF7SzJUFqbQwpo";
-  const channelContext =
-    channelId === "telegram" || channelId === "whatsapp"
-      ? `User's Solana wallet address: ${userWalletAddress}`
-      : undefined;
+  // Try to resolve the user's managed wallet for this channel sender
+  const resolvedWallet = await resolveChannelWallet(channelId, peerId);
+  const fallbackWallet = process.env.USER_WALLET_ADDRESS;
+  const walletAddress = resolvedWallet ?? fallbackWallet;
 
-  try { 
+  const channelContext = walletAddress
+    ? `User's Solana wallet address: ${walletAddress}. This is a managed wallet — you can perform on-chain actions on their behalf.`
+    : `This user has not linked a wallet yet. If they request a blockchain action, ask them to sign in at https://hey-sol.app and link their account.`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+
+  try {
     const resp = await fetch(`${MCP_CLIENT_URL}/channel/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         text,
         senderId: peerId,
@@ -128,6 +238,8 @@ setReplyEngine(async (text, sessionKey, agentId) => {
   } catch (error) {
     console.error(`[ReplyEngine] Error calling MCP client:`, error);
     return "Sorry, the AI service is currently unavailable.";
+  } finally {
+    clearTimeout(timeout);
   }
 });
 
@@ -383,6 +495,12 @@ function getBaseAdapterType(channelId: string): string {
 app.post('/channels/whatsapp/bridge-ready', async (req, res) => {
   const { bridgeUrl } = req.body as { bridgeUrl?: string };
   const url = bridgeUrl || 'http://localhost:3003';
+
+  if (!isAllowedBridgeUrl(url)) {
+    res.status(400).json({ error: 'Invalid bridgeUrl host' });
+    return;
+  }
+
   activeBridgeUrl = url;
   setBridgeUrl(url);
 

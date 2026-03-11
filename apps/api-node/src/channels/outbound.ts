@@ -2,6 +2,7 @@
 
 import { OutboundMessage, OutboundResult } from "./types";
 import { channelRegistry } from "./registry";
+import { formatForChannel } from "./formatter";
 
 /** Dispatch an outbound message to the appropriate channel adapter */
 export async function dispatchOutbound(message: OutboundMessage): Promise<OutboundResult> {
@@ -12,7 +13,13 @@ export async function dispatchOutbound(message: OutboundMessage): Promise<Outbou
 
     // Normalize the target for the specific channel
     const normalizedTarget = adapter.normalizeTarget(message.target);
-    const normalizedMessage = { ...message, target: normalizedTarget };
+
+    // Apply per-channel text formatting before delivery
+    const formattedText = message.text
+      ? formatForChannel(message.text, message.channelId)
+      : message.text;
+
+    const normalizedMessage = { ...message, target: normalizedTarget, text: formattedText };
 
     const result = await adapter.sendOutbound(normalizedMessage);
 

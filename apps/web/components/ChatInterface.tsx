@@ -164,10 +164,9 @@ const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, ha
 
 const ChatInterface = () => {
   const { sendTransaction, publicKey } = useWallet();
+  const solanaRpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "https://api.devnet.solana.com";
   const [messages, setMessages] = useState<Message[]>([]);
   const [lastMessage, setLastMessage] = useState<string>("");
-  const [preparedTx, setPreparedTx] = useState<SignablePayload>();
-  const [nfts, setNfts] = useState<NFT[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
   // Conversation state
@@ -179,6 +178,10 @@ const ChatInterface = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  const wsRef = useRef<WebSocket | null>(null);
+  const pendingBotMessageIdRef = useRef<string | null>(null);
+  const conversationIdRef = useRef<string | null>(null);
+  const fetchConversationsRef = useRef<() => void>(() => {});
 
   // Persist messages to localStorage whenever they change
   useEffect(() => {
@@ -200,6 +203,118 @@ const ChatInterface = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  useEffect(() => {
+    const ws = new WebSocket(`${WEBSOCKET_URL}/chat`);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      const resp = JSON.parse(event.data);
+      const botMessageId = pendingBotMessageIdRef.current;
+      if (!botMessageId) return;
+
+      if (resp.type === "stream") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === botMessageId
+              ? { ...m, text: m.text + resp.text }
+              : m
+          )
+        );
+      } else if (resp.type === "txn_signing") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (Date.now() + 2).toString(),
+            text:
+              resp.transaction.message ||
+              `Prepared **${resp.transaction.action}** transaction for ${resp.transaction.metadata.amount} SOL → \`${resp.transaction.metadata.recipient}\``,
+            sender: "bot",
+            timestamp: new Date(),
+            signablePayload: resp.transaction,
+          },
+        ]);
+      } else if (resp.type === "nft_list") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (Date.now() + 3).toString(),
+            text: `Found **${resp.nfts.length}** NFTs in your wallet.`,
+            sender: "bot",
+            timestamp: new Date(),
+            nfts: resp.nfts,
+          },
+        ]);
+      } else if (resp.type === "done") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === botMessageId ? { ...m, isStreaming: false } : m
+          )
+        );
+
+        if (resp.conversationId) {
+          setConversationId(resp.conversationId);
+          try {
+            const newData = localStorage.getItem(NEW_CONV_KEY);
+            if (newData) {
+              localStorage.setItem(STORAGE_KEY(resp.conversationId), newData);
+              localStorage.removeItem(NEW_CONV_KEY);
+            }
+          } catch {}
+        }
+
+        pendingBotMessageIdRef.current = null;
+        setIsLoading(false);
+        fetchConversationsRef.current();
+      } else if (resp.type === "error") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === botMessageId
+              ? {
+                  ...m,
+                  text: "Sorry, something went wrong. Please try again.",
+                  isStreaming: false,
+                }
+              : m
+          )
+        );
+        pendingBotMessageIdRef.current = null;
+        setIsLoading(false);
+      }
+    };
+
+    ws.onerror = () => {
+      const botMessageId = pendingBotMessageIdRef.current;
+      if (botMessageId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === botMessageId
+              ? {
+                  ...m,
+                  text: "Error connecting to chat service. Please try again.",
+                  isStreaming: false,
+                }
+              : m
+          )
+        );
+      }
+      pendingBotMessageIdRef.current = null;
+      setIsLoading(false);
+    };
+
+    ws.onclose = () => {
+      wsRef.current = null;
+    };
+
+    return () => {
+      ws.close();
+      wsRef.current = null;
+    };
+  }, []);
+
   const quickActions = [
     { label: "Send SOL", icon: <Rocket className="size-4" /> },
     { label: "List NFTs", icon: <AudioWaveform className="size-4" /> },
@@ -219,7 +334,7 @@ const ChatInterface = () => {
 
     try {
       const connection = new Connection(
-        "https://devnet.helius-rpc.com/?api-key=ae52df4b-28e0-41d2-b733-e6eb16617512"
+        solanaRpcUrl
       );
 
       const sig = await sendTransaction(transaction, connection);
@@ -284,114 +399,31 @@ const ChatInterface = () => {
     ]);
 
     try {
-      const ws = new WebSocket(`${WEBSOCKET_URL}/chat`);
+      const ws = wsRef.current;
+      if (!ws) {
+        throw new Error("Chat socket is not connected");
+      }
 
-      ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            message: msg,
-            context: publicKey
-              ? `sender=${publicKey.toBase58()}`
-              : "no-wallet",
-            conversationId: conversationId,
-          })
-        );
-      };
+      pendingBotMessageIdRef.current = botMessageId;
 
-      ws.onmessage = (event) => {
-        const resp = JSON.parse(event.data);
+      const payload = JSON.stringify({
+        message: msg,
+        context: publicKey
+          ? `sender=${publicKey.toBase58()}`
+          : "no-wallet",
+        conversationId: conversationIdRef.current,
+      });
 
-        if (resp.type === "stream") {
-          // Append streaming text to the bot message
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === botMessageId
-                ? { ...m, text: m.text + resp.text }
-                : m
-            )
-          );
-        } else if (resp.type === "txn_signing") {
-          setPreparedTx(resp.transaction.txMessageBase64);
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: (Date.now() + 2).toString(),
-              text:
-                resp.transaction.message ||
-                `Prepared **${resp.transaction.action}** transaction for ${resp.transaction.metadata.amount} SOL → \`${resp.transaction.metadata.recipient}\``,
-              sender: "bot",
-              timestamp: new Date(),
-              signablePayload: resp.transaction,
-            },
-          ]);
-        } else if (resp.type === "nft_list") {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: (Date.now() + 3).toString(),
-              text: `Found **${resp.nfts.length}** NFTs in your wallet.`,
-              sender: "bot",
-              timestamp: new Date(),
-              nfts: resp.nfts,
-            },
-          ]);
-        } else if (resp.type === "done") {
-          // Finalize the streaming message
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === botMessageId ? { ...m, isStreaming: false } : m
-            )
-          );
-
-          // Update conversation ID if returned
-          if (resp.conversationId) {
-            setConversationId(resp.conversationId);
-            // Migrate "new" localStorage data to its permanent key
-            try {
-              const newData = localStorage.getItem(NEW_CONV_KEY);
-              if (newData) {
-                localStorage.setItem(STORAGE_KEY(resp.conversationId), newData);
-                localStorage.removeItem(NEW_CONV_KEY);
-              }
-            } catch {}
-          }
-
-          setIsLoading(false);
-          fetchConversations();
-          ws.close();
-        } else if (resp.type === "error") {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === botMessageId
-                ? {
-                    ...m,
-                    text: "Sorry, something went wrong. Please try again.",
-                    isStreaming: false,
-                  }
-                : m
-            )
-          );
-          setIsLoading(false);
-          ws.close();
-        }
-      };
-
-      ws.onerror = () => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === botMessageId
-              ? {
-                  ...m,
-                  text: "Error connecting to chat service. Please try again.",
-                  isStreaming: false,
-                }
-              : m
-          )
-        );
-        setIsLoading(false);
-      };
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(payload);
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        ws.addEventListener("open", () => ws.send(payload), { once: true });
+      } else {
+        throw new Error("Chat socket is closed");
+      }
     } catch (error) {
       console.error("Error on chat streaming...", error);
+      pendingBotMessageIdRef.current = null;
       setIsLoading(false);
     }
 
@@ -425,6 +457,10 @@ const ChatInterface = () => {
       console.error("Failed to fetch conversations:", err);
     }
   }, []);
+
+  useEffect(() => {
+    fetchConversationsRef.current = fetchConversations;
+  }, [fetchConversations]);
 
   useEffect(() => {
     fetchConversations();

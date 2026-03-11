@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Poppins, Darker_Grotesque } from "next/font/google";
 import "./globals.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
+import { AuthProvider } from "@/components/AuthProvider";
 
 
 const darketrGrotesque = Darker_Grotesque({
@@ -38,7 +39,9 @@ export default function RootLayout({
         <div className="fixed mx-auto top-[-150px] left-0 right-0  h-[300px] w-[600px] rounded-full opacity-75 blur-[200px]
         bg-gradient-to-r from-[#9945FF] to-[#14F195] -z-10" />
         <div className="z-10">
-          {children}
+          <AuthProvider>
+            {children}
+          </AuthProvider>
         </div>
         <div className="fixed mx-auto bottom-[-150px] left-0 right-0  h-[300px] w-[600px] rounded-full opacity-75 blur-[200px]
         bg-gradient-to-r from-[#9945FF] to-[#14F195] -z-10" />
