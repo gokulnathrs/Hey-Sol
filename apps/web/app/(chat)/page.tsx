@@ -23,7 +23,7 @@ export default function Home() {
 
   return (
     <ConnectionProvider endpoint={rpc_endpoint}>
-      <WalletProvider wallets={wallets} autoConnect>
+      <WalletProvider wallets={wallets} autoConnect={false}>
         <WalletModalProvider>
           <div className="flex flex-col h-screen z-10 relative">
               {/* Header */}

@@ -35,10 +35,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         session.user.id = user.id;
 
         // Attach the user's managed wallet public key to the session
-        const wallet = await prisma.managedWallet.findUnique({
+        let wallet = await prisma.managedWallet.findUnique({
           where: { userId: user.id },
           select: { publicKey: true },
         });
+        if (!wallet) {
+          const created = await createManagedWallet(user.id);
+          wallet = { publicKey: created.publicKey };
+        }
         session.user.walletPublicKey = wallet?.publicKey ?? null;
       }
       return session;

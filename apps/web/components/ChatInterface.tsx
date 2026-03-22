@@ -23,6 +23,8 @@ import NFTCard, { NFT } from "./NFTCard";
 import MarkdownMessage from "./MarkdownMessage";
 import Sidebar, { ConversationMeta } from "./Sidebar";
 import ChannelManager from "./ChannelManager";
+import { useSession } from "next-auth/react";
+import { useWalletMode } from "@/lib/wallet-mode";
 
 type Message = {
   id: string;
@@ -66,9 +68,11 @@ type MessagesProps = {
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
   handleScroll: () => void;
   handleSignAndSend: (payload: SignablePayload) => void;
+  walletModeLabel: string;
+  showSignButton: boolean;
 };
 
-const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, handleSignAndSend }: MessagesProps) => (
+const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, handleSignAndSend, walletModeLabel, showSignButton }: MessagesProps) => (
   <div
     ref={chatContainerRef}
     onScroll={handleScroll}
@@ -88,7 +92,7 @@ const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, ha
           >
             {/* Avatar */}
             <div
-              className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1 ${
+              className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1 ${
                 m.sender === "user"
                   ? "bg-sol-purple/20 text-sol-purple"
                   : "bg-sol-green/20 text-sol-green"
@@ -128,13 +132,13 @@ const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, ha
                 </p>
               )}
 
-              {m.signablePayload && (
+              {m.signablePayload && showSignButton && (
                 <button
                   onClick={() => handleSignAndSend(m.signablePayload!)}
-                  className="mt-3 px-4 py-2 bg-gradient-to-r from-sol-purple to-sol-purple/90 text-white rounded-xl
-                             text-sm font-medium cursor-pointer hover:opacity-90 transition-opacity"
+                  className="mt-3 px-4 py-2 bg-linear-to-r from-sol-purple to-sol-purple/90 text-white rounded-xl
+                             text-sm font-medium cursor-pointer hover:opacity-90 transition-all duration-200 hover:scale-[1.01]"
                 >
-                  Sign & Confirm {m.signablePayload.action}
+                  Sign ({walletModeLabel}) & Confirm {m.signablePayload.action}
                 </button>
               )}
 
@@ -164,6 +168,8 @@ const Messages = ({ messages, chatContainerRef, messagesEndRef, handleScroll, ha
 
 const ChatInterface = () => {
   const { sendTransaction, publicKey } = useWallet();
+  const { data: session } = useSession();
+  const { mode: walletMode } = useWalletMode();
   const solanaRpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "https://api.devnet.solana.com";
   const [messages, setMessages] = useState<Message[]>([]);
   const [lastMessage, setLastMessage] = useState<string>("");
@@ -180,6 +186,7 @@ const ChatInterface = () => {
   const isNearBottomRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
   const pendingBotMessageIdRef = useRef<string | null>(null);
+  const walletModeRef = useRef(walletMode);
   const conversationIdRef = useRef<string | null>(null);
   const fetchConversationsRef = useRef<() => void>(() => {});
 
@@ -208,6 +215,10 @@ const ChatInterface = () => {
   }, [conversationId]);
 
   useEffect(() => {
+    walletModeRef.current = walletMode;
+  }, [walletMode]);
+
+  useEffect(() => {
     const ws = new WebSocket(`${WEBSOCKET_URL}/chat`);
     wsRef.current = ws;
 
@@ -225,16 +236,18 @@ const ChatInterface = () => {
           )
         );
       } else if (resp.type === "txn_signing") {
+        const raw = resp.transaction as any;
+        const payload = raw as SignablePayload;
         setMessages((prev) => [
           ...prev,
           {
             id: (Date.now() + 2).toString(),
             text:
-              resp.transaction.message ||
-              `Prepared **${resp.transaction.action}** transaction for ${resp.transaction.metadata.amount} SOL → \`${resp.transaction.metadata.recipient}\``,
+              raw.message ||
+              `Prepared **${payload.action}** transaction for ${payload.metadata?.amount} SOL → \`${payload.metadata?.recipient}\``,
             sender: "bot",
             timestamp: new Date(),
-            signablePayload: resp.transaction,
+            signablePayload: payload,
           },
         ]);
       } else if (resp.type === "nft_list") {
@@ -322,22 +335,58 @@ const ChatInterface = () => {
     { label: "View Transactions", icon: <ScanSearch className="size-4" /> },
   ];
 
-  const handleSignAndSend = async (payload: SignablePayload) => {
-    if (!payload.txMessageBase64) return;
-    if (!publicKey) {
-      alert("Please connect your wallet to sign the transaction.");
-      return;
-    }
+  const managedWalletPublicKey =
+    ((session?.user as any)?.walletPublicKey as string | null) ?? null;
+  const activeSenderAddress =
+    walletMode === "adapter"
+      ? publicKey?.toBase58() ?? null
+      : managedWalletPublicKey;
 
-    const txBytes = Buffer.from(payload.txMessageBase64, "base64");
-    const transaction = VersionedTransaction.deserialize(txBytes);
+  const handleSignAndSend = async (
+    payload: SignablePayload,
+    modeOverride?: "managed" | "adapter"
+  ) => {
+    if (!payload.txMessageBase64) return;
 
     try {
-      const connection = new Connection(
-        solanaRpcUrl
-      );
+      const connection = new Connection(solanaRpcUrl);
 
-      const sig = await sendTransaction(transaction, connection);
+      let sig = "";
+      const effectiveMode = modeOverride ?? walletMode;
+      if (effectiveMode === "adapter") {
+        if (!publicKey) {
+          alert("Connect a wallet in Wallet Adapter mode before signing.");
+          return;
+        }
+
+        const txBytes = Buffer.from(payload.txMessageBase64, "base64");
+        const transaction = VersionedTransaction.deserialize(txBytes);
+        // Refresh blockhash — MCP prepared the tx earlier and it may have expired.
+        const { blockhash: freshBlockhash } = await connection.getLatestBlockhash("confirmed");
+        transaction.message.recentBlockhash = freshBlockhash;
+        sig = await sendTransaction(transaction, connection);
+      } else {
+        const signRes = await fetch("/api/wallet/sign", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transaction: payload.txMessageBase64,
+            meta: {
+              action: payload.action,
+              recipient: payload.metadata?.recipient,
+            },
+          }),
+        });
+
+        const signData = await signRes.json();
+        if (!signRes.ok || !signData?.signedTransaction) {
+          throw new Error(signData?.error || "Failed to sign with managed wallet");
+        }
+
+        const rawTx = Buffer.from(signData.signedTransaction, "base64");
+        sig = await connection.sendRawTransaction(rawTx, { skipPreflight: false });
+        await connection.confirmTransaction(sig, "confirmed");
+      }
       
       setMessages((prev) => [
         ...prev,
@@ -379,7 +428,7 @@ const ChatInterface = () => {
       text: msg,
       sender: "user",
       timestamp: new Date(),
-      context: publicKey ? `sender=${publicKey.toBase58()}` : "no-wallet",
+      context: activeSenderAddress ? `sender=${activeSenderAddress}` : "no-wallet",
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -408,8 +457,8 @@ const ChatInterface = () => {
 
       const payload = JSON.stringify({
         message: msg,
-        context: publicKey
-          ? `sender=${publicKey.toBase58()}`
+        context: activeSenderAddress
+          ? `sender=${activeSenderAddress}`
           : "no-wallet",
         conversationId: conversationIdRef.current,
       });
@@ -521,7 +570,12 @@ const ChatInterface = () => {
     }
   };
 
-  const handleSignAndSendStable = useCallback(handleSignAndSend, [publicKey, sendTransaction]);
+  const handleSignAndSendStable = useCallback(
+    (payload: SignablePayload) => {
+      void handleSignAndSend(payload);
+    },
+    [publicKey, sendTransaction]
+  );
 
   return (
     <div className="flex h-screen">
@@ -560,6 +614,16 @@ const ChatInterface = () => {
           </div>
         </div>
 
+        {/* Wallet mode info */}
+        <div className="px-4 py-2 border-b border-foreground/5 bg-foreground/2 transition-colors duration-200">
+          <p className="text-xs text-foreground/60">
+            Mode: <span className="font-medium text-foreground/85">{walletMode === "managed" ? "Managed wallet" : "Wallet adapter"}</span>
+            {walletMode === "adapter"
+              ? " - Some managed flows (audit-linked signing, channel-linked identity) may not work for all actions."
+              : " - Uses your managed wallet for context and signing."}
+          </p>
+        </div>
+
         {/* Messages */}
         <div className="flex-1 overflow-hidden flex flex-col">
           {messages.filter((m) => m.text || m.isStreaming).length === 0 ? (
@@ -571,11 +635,12 @@ const ChatInterface = () => {
               messagesEndRef={messagesEndRef}
               handleScroll={handleScroll}
               handleSignAndSend={handleSignAndSendStable}
+              walletModeLabel={walletMode === "managed" ? "managed" : "adapter"}
+              showSignButton={walletMode === "adapter"}
             />
           )}
         </div>
 
-        {/* Input Area */}
         <div className="p-3 lg:p-4">
           <div className="max-w-3xl mx-auto">
             {/* Quick Actions — above input */}
@@ -594,7 +659,7 @@ const ChatInterface = () => {
             )}
 
             <div className="bg-background/70 sol-gradient rounded-[20px] overflow-hidden">
-              <div className="bg-background/40 p-[1px] overflow-hidden">
+              <div className="bg-background/40 p-px overflow-hidden">
                 <div className="bg-background rounded-[19px]">
                   <MessageInput
                     setValue={setLastMessage}

@@ -164,7 +164,10 @@ loadRoutes([
  * Resolve the managed wallet public key for a (channelId, senderId) pair
  * by calling the web app's internal API.  Returns null if not linked.
  */
-async function resolveChannelWallet(channelId: string, senderId: string): Promise<string | null> {
+async function resolveChannelWallet(
+  channelId: string,
+  senderId: string
+): Promise<{ publicKey: string | null; userId: string | null }> {
   try {
     const res = await fetch(`${WALLET_SERVICE_URL}/api/channel/resolve-wallet`, {
       method: "POST",
@@ -175,11 +178,14 @@ async function resolveChannelWallet(channelId: string, senderId: string): Promis
       body: JSON.stringify({ channelId, senderId }),
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return null;
-    const data = await res.json() as { publicKey?: string | null };
-    return data.publicKey ?? null;
+    if (!res.ok) return { publicKey: null, userId: null };
+    const data = await res.json() as { publicKey?: string | null; userId?: string | null };
+    return {
+      publicKey: data.publicKey ?? null,
+      userId: data.userId ?? null,
+    };
   } catch {
-    return null;
+    return { publicKey: null, userId: null };
   }
 }
 
@@ -196,9 +202,9 @@ setReplyEngine(async (text, sessionKey, agentId) => {
   const existingConvId = channelConversations.get(convKey);
 
   // Try to resolve the user's managed wallet for this channel sender
-  const resolvedWallet = await resolveChannelWallet(channelId, peerId);
+  const resolved = await resolveChannelWallet(channelId, peerId);
   const fallbackWallet = process.env.USER_WALLET_ADDRESS;
-  const walletAddress = resolvedWallet ?? fallbackWallet;
+  const walletAddress = resolved.publicKey ?? fallbackWallet;
 
   const channelContext = walletAddress
     ? `User's Solana wallet address: ${walletAddress}. This is a managed wallet — you can perform on-chain actions on their behalf.`

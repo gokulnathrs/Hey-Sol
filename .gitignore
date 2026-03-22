@@ -48,3 +48,13 @@ __pycache__
 .vscode
 *.sublime-workspace
 *.sublime-project
+
+.agents
+skills-lock.json
+*-lock.yaml
+
+auth_info_baileys
+
+client_secret_*.json
+
+pending-changes.md

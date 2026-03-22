@@ -9,75 +9,140 @@ import { useState } from "react";
 export default function SignInPage() {
   const [email, setEmail] = useState("");
   const [emailSent, setEmailSent] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleEmailSignIn(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
-    await signIn("resend", { email, redirect: false });
-    setEmailSent(true);
-    setLoading(false);
+    setEmailLoading(true);
+    setError(null);
+    try {
+      const result = await signIn("resend", { email, redirect: false });
+      if (result?.error) {
+        setError("Could not send magic link. Please try again.");
+        return;
+      }
+      setEmailSent(true);
+    } catch {
+      setError("Could not send magic link. Please try again.");
+    } finally {
+      setEmailLoading(false);
+    }
+  }
+
+  async function handleGoogleSignIn() {
+    setGoogleLoading(true);
+    setError(null);
+    try {
+      await signIn("google", { callbackUrl: "/" });
+    } catch {
+      setError("Google sign-in failed. Please try again.");
+      setGoogleLoading(false);
+    }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-black">
-      <div className="w-full max-w-sm space-y-6 p-8 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-white">Welcome to HeySOL</h1>
-          <p className="mt-1 text-sm text-white/50">
-            Your chat-based gateway to Solana
-          </p>
-        </div>
+    <div
+      className="relative min-h-screen overflow-hidden px-6 py-10"
+      style={{
+        background:
+          "radial-gradient(circle at 18% 18%, rgba(20,241,149,0.18), transparent 35%), radial-gradient(circle at 82% 20%, rgba(255,140,66,0.2), transparent 36%), radial-gradient(circle at 50% 120%, rgba(0,170,255,0.2), transparent 44%), #07121e",
+      }}
+    >
+      <div
+        className="pointer-events-none absolute inset-0 opacity-20"
+        style={{
+          backgroundImage:
+            "linear-gradient(rgba(255,255,255,0.16) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.16) 1px, transparent 1px)",
+          backgroundSize: "36px 36px",
+        }}
+      />
 
-        {emailSent ? (
-          <div className="text-center space-y-2">
-            <p className="text-green-400 font-medium">Check your inbox!</p>
-            <p className="text-white/60 text-sm">
-              We sent a magic link to <span className="text-white">{email}</span>.
-              Click it to sign in — no password needed.
+      <div className="relative mx-auto flex min-h-[80vh] w-full max-w-5xl items-center justify-center">
+        <section className="relative w-full max-w-lg overflow-hidden rounded-[28px] border border-white/20 bg-[#0b1727]/85 p-8 text-white shadow-[0_22px_80px_rgba(0,0,0,0.46)] backdrop-blur-2xl sm:p-10">
+          <div className="pointer-events-none absolute -right-24 -top-24 h-52 w-52 rounded-full bg-[#16f2a1]/18 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-28 -left-24 h-64 w-64 rounded-full bg-[#00a2ff]/14 blur-3xl" />
+
+          <div className="relative text-center">
+            <p className="mb-3 inline-flex items-center rounded-full border border-white/25 bg-white/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.22em] text-white/75">
+              Secure Access
+            </p>
+            <h1 className="font-darker-grotesque text-5xl font-extrabold leading-[0.95] sm:text-6xl">
+              Welcome to HeySOL
+            </h1>
+            <p className="mx-auto mt-3 max-w-sm text-sm text-slate-200/75">
+              Sign in to launch your chat-driven Solana workspace with managed wallet support.
             </p>
           </div>
-        ) : (
-          <>
-            {/* Google */}
-            <button
-              onClick={() => signIn("google", { callbackUrl: "/" })}
-              className="w-full flex items-center justify-center gap-3 rounded-xl border border-white/20 bg-white/10 px-4 py-3 text-sm font-medium text-white hover:bg-white/20 transition"
-            >
-              <GoogleIcon />
-              Continue with Google
-            </button>
 
-            <div className="flex items-center gap-3">
-              <span className="h-px flex-1 bg-white/10" />
-              <span className="text-xs text-white/40">or</span>
-              <span className="h-px flex-1 bg-white/10" />
-            </div>
+          <div className="relative mt-7 space-y-5">
+            {error && (
+              <div className="rounded-xl border border-rose-300/40 bg-rose-600/20 px-4 py-3 text-sm text-rose-100">
+                {error}
+              </div>
+            )}
 
-            {/* Email magic link */}
-            <form onSubmit={handleEmailSignIn} className="space-y-3">
-              <input
-                type="email"
-                required
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full rounded-xl border border-white/20 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500"
-              />
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-xl bg-violet-600 hover:bg-violet-700 disabled:opacity-50 px-4 py-3 text-sm font-semibold text-white transition"
-              >
-                {loading ? "Sending…" : "Send magic link"}
-              </button>
-            </form>
-          </>
-        )}
+            {emailSent ? (
+              <div className="space-y-2 rounded-2xl border border-emerald-300/35 bg-emerald-500/15 p-5 text-center">
+                <p className="text-base font-semibold text-emerald-200">Magic link sent</p>
+                <p className="text-sm text-emerald-100/90">
+                  Check <span className="font-medium text-white">{email}</span> and use the link to finish sign-in.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEmail("");
+                    setEmailSent(false);
+                  }}
+                  className="mt-2 rounded-lg border border-white/30 bg-white/10 px-3 py-1.5 text-xs font-medium text-white transition duration-150 hover:bg-white/20 active:scale-[0.98]"
+                >
+                  Use another email
+                </button>
+              </div>
+            ) : (
+              <>
+                <button
+                  onClick={handleGoogleSignIn}
+                  disabled={googleLoading || emailLoading}
+                  className="group flex w-full items-center justify-center gap-3 rounded-2xl border border-white/25 bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_34px_rgba(255,255,255,0.22)] active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <GoogleIcon />
+                  {googleLoading ? "Redirecting..." : "Continue with Google"}
+                </button>
 
-        <p className="text-center text-xs text-white/30">
-          Signing in creates a custodial Solana wallet for you automatically.
-        </p>
+                <div className="flex items-center gap-3">
+                  <span className="h-px flex-1 bg-white/20" />
+                  <span className="text-xs uppercase tracking-[0.2em] text-white/50">or</span>
+                  <span className="h-px flex-1 bg-white/20" />
+                </div>
+
+                <form onSubmit={handleEmailSignIn} className="space-y-3">
+                  <label className="block text-xs uppercase tracking-[0.18em] text-white/55">Email</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full rounded-2xl border border-white/25 bg-white/10 px-4 py-3 text-sm text-white placeholder:text-slate-300/55 outline-none transition duration-150 focus:border-[#16f2a1]/70 focus:ring-4 focus:ring-[#16f2a1]/25"
+                  />
+                  <button
+                    type="submit"
+                    disabled={emailLoading || googleLoading}
+                    className="w-full rounded-2xl bg-[linear-gradient(110deg,#16f2a1,#2ad2ff)] px-4 py-3 text-sm font-bold text-[#05121f] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_14px_34px_rgba(22,242,161,0.38)] active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-65"
+                  >
+                    {emailLoading ? "Sending magic link..." : "Send magic link"}
+                  </button>
+                </form>
+              </>
+            )}
+          </div>
+
+          <p className="relative mt-6 text-center text-xs text-slate-300/70">
+            By signing in, a managed Solana wallet is created and secured for you.
+          </p>
+        </div>
       </div>
     </div>
   );

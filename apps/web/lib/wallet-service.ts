@@ -9,7 +9,7 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
-import { Keypair, Transaction, VersionedTransaction } from "@solana/web3.js";
+import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 import { prisma } from "./prisma";
 import type { ManagedWallet } from "@prisma/client";
@@ -95,52 +95,17 @@ export async function getWalletForUser(userId: string): Promise<ManagedWallet | 
   return prisma.managedWallet.findUnique({ where: { userId } });
 }
 
-// ---------------------------------------------------------------------------
-// Transaction signing
-// ---------------------------------------------------------------------------
-
 /**
- * Sign a base64-encoded serialized Transaction or VersionedTransaction
- * using the user's managed private key.
- *
- * Returns the signed transaction serialized as base64.
+ * Retrieve the decrypted private key (base58) for a user's managed wallet.
+ * Intended for explicit, user-initiated export flows.
  */
-export async function signTransactionForUser(
-  userId: string,
-  serializedTxBase64: string
-): Promise<string> {
+export async function getDecryptedPrivateKeyForUser(userId: string): Promise<string> {
   const wallet = await prisma.managedWallet.findUnique({ where: { userId } });
   if (!wallet) throw new Error(`No managed wallet found for user ${userId}`);
-
-  const privateKeyBs58 = decryptPrivateKey(wallet.encryptedPrivateKey);
-  const secretKey = bs58.decode(privateKeyBs58);
-  const keypair = Keypair.fromSecretKey(secretKey);
-
-  const txBytes = Buffer.from(serializedTxBase64, "base64");
-
-  // Detect whether this is a legacy or versioned transaction
-  let signed: Buffer;
-  try {
-    // VersionedTransaction detection: first byte is a version prefix (0x80+)
-    if (txBytes[0] >= 0x80) {
-      const vtx = VersionedTransaction.deserialize(txBytes);
-      vtx.sign([keypair]);
-      signed = Buffer.from(vtx.serialize());
-    } else {
-      const tx = Transaction.from(txBytes);
-      tx.sign(keypair);
-      signed = tx.serialize();
-    }
-  } catch {
-    // Fallback: try legacy Transaction
-    const tx = Transaction.from(txBytes);
-    tx.sign(keypair);
-    signed = tx.serialize();
-  }
-
-  return signed.toString("base64");
+  return decryptPrivateKey(wallet.encryptedPrivateKey);
 }
 
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Channel identity linking
 // ---------------------------------------------------------------------------

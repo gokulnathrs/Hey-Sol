@@ -198,6 +198,7 @@ class MCPClient:
         websocket: Optional[WebSocket] = None,
         context: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        result_meta: Optional[dict] = None,
     ):
         if not self.session:
             raise ValueError("MCP client session is not initialized")
@@ -291,6 +292,8 @@ class MCPClient:
                     tool_msg = tx_payload.get("message", f"Prepared {tx_payload.get('action', '')} transaction")
                     full_response += tool_msg
                 elif tx_payload and not websocket:
+                    if result_meta is not None:
+                        result_meta["transaction"] = tx_payload
                     # Channel mode (WhatsApp / Telegram) — produce readable text
                     action = tx_payload.get("action", "transaction")
                     amount = tx_payload.get("amount", "")
@@ -497,9 +500,10 @@ async def channel_message(req: ChannelMessageRequest):
     conversation_store.add_message(conv.id, "user", req.text)
 
     full_response = ""
+    result_meta: dict = {}
     try:
         async for chunk in mcp_client_class.stream_query(
-            req.text, None, req.context, conv.id
+            req.text, None, req.context, conv.id, result_meta
         ):
             full_response += chunk
     except Exception as e:
@@ -508,6 +512,7 @@ async def channel_message(req: ChannelMessageRequest):
 
     return {
         "response": full_response,
+        "transaction": result_meta.get("transaction"),
         "conversationId": conv.id,
         "conversationTitle": conv.title,
     }
