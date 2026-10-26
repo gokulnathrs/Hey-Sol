@@ -1,0 +1,154 @@
+// Hey-Sol Prisma Schema
+// Run `pnpm db:migrate` from apps/web to apply changes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth — NextAuth v5 required tables
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts        Account[]
+  sessions        Session[]
+  wallet          ManagedWallet?
+  channelAccounts ChannelAccount[]
+  txPolicies      TxPolicy[]
+  txAuditLogs     TxAuditLog[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------------------------------------------------------------------------
+// Managed (custodial) wallets — one per user
+// ---------------------------------------------------------------------------
+
+model ManagedWallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  publicKey String   @unique   // base58 Solana public key — safe to expose
+  // encryptedPrivateKey stores AES-256-GCM encrypted bs58 private key.
+  // Format: "<iv_hex>:<authTag_hex>:<ciphertext_hex>"
+  // The encryption key lives in WALLET_ENCRYPTION_KEY env var (never in DB).
+  encryptedPrivateKey String  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  txAuditLogs TxAuditLog[]
+}
+
+// ---------------------------------------------------------------------------
+// Channel identity linking — maps (channelId, senderId) → user
+// ---------------------------------------------------------------------------
+
+model ChannelAccount {
+  id        String   @id @default(cuid())
+  userId    String
+  channelId String   // "telegram" | "whatsapp" | "webchat"
+  senderId  String   // channel-specific sender identifier
+  label     String?  // optional human-readable label
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, senderId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Transaction policies — per-user spending rules
+// ---------------------------------------------------------------------------
+
+model TxPolicy {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String   // "send_sol" | "*" (wildcard)
+  // maxAmountLamports: max SOL in lamports per single tx (0 = unlimited)
+  maxAmountLamports BigInt  @default(0)
+  // velocityWindowMs + velocityMaxLamports: rolling spend limit
+  velocityWindowMs      Int    @default(0)
+  velocityMaxLamports   BigInt @default(0)
+  // allowedDestinations: comma-separated public keys; empty = unrestricted
+  allowedDestinations   String @default("") @db.Text
+  requireConfirmation   Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, action])
+}
+
+// ---------------------------------------------------------------------------
+// Audit log — immutable record of every signing action
+// ---------------------------------------------------------------------------
+
+model TxAuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  walletId   String
+  action     String   // tool name, e.g. "prepare_send_sol_transaction"
+  channelId  String?  // originating channel
+  senderId   String?  // originating channel sender
+  amountLamports BigInt?
+  recipient  String?
+  txSignature String?  // Solana tx signature once signed
+  status     String   @default("pending") // "pending" | "signed" | "rejected" | "failed"
+  metadata   Json?    // arbitrary extra context
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet ManagedWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([walletId])
+}

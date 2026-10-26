@@ -40,6 +40,7 @@ COPY package.json pnpm-lock.yaml turbo.json pnpm-workspace.yaml ./
 COPY apps/mcp-server/package.json apps/mcp-server/
 COPY apps/api-node/package.json apps/api-node/
 COPY apps/web/package.json apps/web/
+COPY apps/whatsapp-bridge/package.json apps/whatsapp-bridge/
 
 COPY packages/shared/package.json packages/shared/
 
@@ -52,11 +53,12 @@ COPY apps/mcp-client ./apps/mcp-client
 COPY apps/mcp-server ./apps/mcp-server
 COPY apps/api-node ./apps/api-node
 COPY apps/web ./apps/web
+COPY apps/whatsapp-bridge ./apps/whatsapp-bridge
 
 # -------------------
 # 5. Expose ports
 # -------------------
-EXPOSE 3000 8000 5000
+EXPOSE 3000 3002 3003 8002
 
 # -------------------
 # 6. Start all apps
